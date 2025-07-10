@@ -1,10 +1,13 @@
 import os
 from flask import Flask, request, jsonify
+from flask_cors import CORS
 from google.cloud import vision
 import re
 
 # --- Initialize the Flask App ---
 app = Flask(__name__)
+# Enable CORS for all routes, allowing your InfinityFree site to connect
+CORS(app)
 
 # --- Your Working Data Extraction Code ---
 def extract_text_with_google_vision(image_content):
@@ -17,9 +20,7 @@ def extract_text_with_google_vision(image_content):
     return response.text_annotations[0].description if response.text_annotations else ""
 
 def parse_medical_data_locally(text):
-    """
-    Parses clean text with high-accuracy rules tailored to the prescription layout.
-    """
+    """Parses clean text with high-accuracy rules."""
     structured_data = {
         "doctor_name": "Not found",
         "patient_name": "Not found",
@@ -27,13 +28,11 @@ def parse_medical_data_locally(text):
         "patient_age": "Not found",
         "medications": []
     }
-    
     lines = [line.strip() for line in text.split('\n') if line.strip()]
     patient_parts = {}
     headers_to_ignore = ["Docteur", "Spécialiste", "Tél", "Nom:", "Prénom:", "Age", "ORDONNANCE", "Jdioula"]
 
     for i, line in enumerate(lines):
-        # Doctor and Date Extraction
         if "Docteur YOUCEF Samir" in line:
             structured_data["doctor_name"] = "Docteur YOUCEF Samir"
         
@@ -41,28 +40,23 @@ def parse_medical_data_locally(text):
         if date_match:
             structured_data["prescription_date"] = date_match.group(0)
 
-        # Patient Name Extraction (looks at the next line)
         if "Nom:" in line and i + 1 < len(lines):
             patient_parts['last_name'] = lines[i+1]
         if "Prénom:" in line and i + 1 < len(lines):
             patient_parts['first_name'] = lines[i+1]
         
-        # Age Extraction
         if "Age" in line:
             if i > 0 and re.search(r'\d+', lines[i-1]):
                 structured_data["patient_age"] = lines[i-1].strip()
             elif i + 1 < len(lines) and re.search(r'\d+', lines[i+1]):
                 structured_data["patient_age"] = lines[i+1].strip()
 
-    # Combine patient name parts and add to ignore list
     if 'last_name' in patient_parts or 'first_name' in patient_parts:
         structured_data["patient_name"] = f"{patient_parts.get('last_name', '')} {patient_parts.get('first_name', '')}".strip()
         headers_to_ignore.extend(structured_data["patient_name"].split())
     
-    # Medication Extraction
+    med_pattern = re.compile(r'([A-Z]{3,}.*\s(\d|CP|GEL|UI|B\.O\.N))')
     for i, line in enumerate(lines):
-        med_pattern = re.compile(r'([A-Z]{3,}.*\s(\d|CP|GEL|UI|B\.O\.N))')
-        
         if med_pattern.search(line) and not any(header in line for header in headers_to_ignore):
             name = re.sub(r'\s+01\s+boite\.?$', '', line).strip()
             instruction = "Not specified"
@@ -94,5 +88,4 @@ def process_image_endpoint():
         return jsonify({"error": str(e)}), 500
 
 if __name__ == '__main__':
-    # This part is for local testing only
     app.run(debug=True)
