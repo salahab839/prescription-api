@@ -13,7 +13,8 @@ CORS(app)
 
 # --- Define Google Cloud Project Details ---
 GCP_PROJECT_ID = "acoustic-bridge-465311-v9"
-GCP_LOCATION = "us-central1" # A common, stable region for AI models
+# --- FINAL ATTEMPT: Changed to a different European region ---
+GCP_LOCATION = "europe-west4" 
 
 # --- Function to use Google Vision API for OCR ---
 def extract_text_with_google_vision(image_content):
@@ -32,8 +33,8 @@ def extract_data_with_gemini(text_content):
     # Initialize Vertex AI
     vertexai.init(project=GCP_PROJECT_ID, location=GCP_LOCATION)
     
-    # Use a stable and widely available Gemini model
-    model = GenerativeModel("gemini-1.0-pro")
+    # --- FINAL ATTEMPT: Changed to a newer, often more available model ---
+    model = GenerativeModel("gemini-1.5-flash-001")
 
     # The prompt asking the AI what to do
     prompt = f"""
