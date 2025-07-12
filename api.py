@@ -3,12 +3,23 @@ from flask import Flask, request, jsonify
 from flask_cors import CORS
 from google.cloud import vision
 import re
+import spacy
+from spacy.matcher import Matcher
 
-# --- Initialize the Flask App ---
+# --- Initialize Flask App and SpaCy ---
 app = Flask(__name__)
 CORS(app)
 
-# --- Data Extraction Code ---
+# Load the French spaCy model
+try:
+    nlp = spacy.load("fr_core_news_sm")
+except OSError:
+    # This will run on Render during the build process
+    print("Downloading spaCy model...")
+    spacy.cli.download("fr_core_news_sm")
+    nlp = spacy.load("fr_core_news_sm")
+
+# --- API Functions ---
 def extract_text_with_google_vision(image_content):
     """Uses Google Cloud Vision API for superior OCR."""
     client = vision.ImageAnnotatorClient()
@@ -18,81 +29,65 @@ def extract_text_with_google_vision(image_content):
         raise Exception(response.error.message)
     return response.text_annotations[0].description if response.text_annotations else ""
 
-def parse_medical_data_locally(text):
-    """
-    Parses clean text with the most effective rules we developed.
-    """
+def parse_data_with_spacy(text):
+    """Parses clean text with spaCy's Matcher for high accuracy."""
+    doc = nlp(text)
+    matcher = Matcher(nlp.vocab)
+    
     structured_data = {
         "doctor_name": "Not found",
         "patient_name": "Not found",
         "prescription_date": "Not found",
         "patient_age": "Not found",
+        "patient_dob": "Not found",
         "medications": []
     }
-    
-    lines = [line.strip() for line in text.split('\n') if line.strip()]
-    
-    patient_parts = {}
-    headers_to_ignore = ["Docteur", "Spécialiste", "Tél", "Nom:", "Prénom:", "Age", "ORDONNANCE", "Jdioula"]
 
-    # --- Data Extraction Logic ---
+    # Pattern for Doctor: "Docteur" or "Dr." followed by Proper Nouns
+    doctor_pattern = [{"LOWER": {"in": ["docteur", "dr", "dr."]}}, {"POS": "PROPN", "OP": "+"}]
+    # Pattern for Patient: "Nom" or "Prénom" followed by a colon and Proper Nouns
+    patient_pattern = [{"LOWER": {"in": ["nom", "prénom"]}}, {"TEXT": ":"}, {"POS": "PROPN", "OP": "+"}]
+    # Pattern for Date: A specific regex match
+    date_pattern = [{"TEXT": {"REGEX": r"\d{2}/\d{2}/\d{4}"}}]
+
+    matcher.add("DOCTOR", [doctor_pattern])
+    matcher.add("PATIENT", [patient_pattern])
+    matcher.add("DATE", [date_pattern])
+
+    matches = matcher(doc)
+    
+    patient_parts = []
+    for match_id, start, end in matches:
+        string_id = nlp.vocab.strings[match_id]
+        span = doc[start:end]
+        if string_id == "DOCTOR":
+            structured_data["doctor_name"] = span.text
+        elif string_id == "PATIENT":
+            patient_parts.append(span.text.split(":")[-1].strip())
+        elif string_id == "DATE":
+            structured_data["prescription_date"] = span.text
+
+    if patient_parts:
+        structured_data["patient_name"] = " ".join(patient_parts)
+
+    # Use regex for medications as it's often more flexible for drug names
+    lines = text.split('\n')
     for i, line in enumerate(lines):
-        # Doctor Extraction
-        if line.lower().startswith("docteur ") or line.lower().startswith("dr "):
-            structured_data["doctor_name"] = line
-        
-        # Date Extraction
-        date_match = re.search(r'\d{2}/\d{2}/\d{4}', line)
-        if date_match:
-            structured_data["prescription_date"] = date_match.group(0)
-
-        # Patient Name Extraction (handles different formats)
-        if "Nom & Prénom :" in line:
-            structured_data["patient_name"] = line.split(":")[-1].strip()
-        elif line.lower().startswith("nom :") and ":" in line:
-            patient_parts['last_name'] = line.split(":")[-1].strip()
-        elif line.lower().startswith("prénom :") and ":" in line:
-            patient_parts['first_name'] = line.split(":")[-1].strip()
-        
-        # Age Extraction
-        if line.lower().startswith("age :"):
-            structured_data["patient_age"] = line.split(":")[-1].strip()
-
-    # Combine patient name parts if found separately
-    if structured_data["patient_name"] == "Not found":
-        if 'last_name' in patient_parts or 'first_name' in patient_parts:
-            structured_data["patient_name"] = f"{patient_parts.get('first_name', '')} {patient_parts.get('last_name', '')}".strip()
-    
-    if structured_data["patient_name"] != "Not found":
-        headers_to_ignore.extend(structured_data["patient_name"].upper().split())
-
-    # Medication Extraction
-    try:
-        start_index = lines.index("ORDONNANCE") + 1
-    except ValueError:
-        start_index = 0
-
-    for i in range(start_index, len(lines)):
-        line = lines[i]
-        # Regex to find lines that are likely medications
-        med_pattern = re.compile(r'([A-Z]{3,}.*\s(\d|CP|GEL|UI|B\.O\.N))')
-        
-        if med_pattern.search(line) and not any(header in line for header in headers_to_ignore):
-            name = re.sub(r'\s+01\s+boite\.?$', '', line).strip()
-            instruction = "Not specified"
-            if i + 1 < len(lines):
+        med_match = re.match(r'^\d+\)?\s*(.*?)(?:\.\s*(.*))?$', line, re.IGNORECASE)
+        if med_match:
+            name = med_match.group(1).strip()
+            instruction = med_match.group(2) or ""
+            if "QSP" in name: name = name.split("QSP")[0].strip()
+            if not instruction.strip() and i + 1 < len(lines):
                 next_line = lines[i+1]
-                if next_line and (next_line[0].isdigit() or next_line.lower().startswith(("par", "à", "au"))):
+                if not (re.match(r'^\d+\)', next_line.lstrip()) or "QSP" in next_line):
                     instruction = next_line
-            
-            structured_data["medications"].append({
-                "name": name, 
-                "dosage_and_frequency": instruction
-            })
-            
+            if "@" not in name:
+                structured_data["medications"].append({"name": name, "dosage_and_frequency": instruction.strip() if instruction else "Not specified"})
+
     return structured_data
 
-# --- Define the API Endpoint ---
+# --- API Endpoint ---
 @app.route('/process_image', methods=['POST'])
 def process_image_endpoint():
     if 'file' not in request.files:
@@ -103,13 +98,13 @@ def process_image_endpoint():
     try:
         image_content = file.read()
         ocr_text = extract_text_with_google_vision(image_content)
-        structured_data = parse_medical_data_locally(ocr_text)
+        structured_data = parse_data_with_spacy(ocr_text)
         return jsonify(structured_data), 200
     except Exception as e:
         import traceback
         print("!!! A SERVER ERROR OCCURRED !!!")
         print(traceback.format_exc())
-        return jsonify({"error": "An internal server error occurred."}), 500
+        return jsonify({"error": f"An internal server error occurred: {e}"}), 500
 
 if __name__ == '__main__':
     app.run(debug=True)
