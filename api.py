@@ -2,16 +2,15 @@ import os
 from flask import Flask, request, jsonify
 from flask_cors import CORS
 from google.cloud import vision
-from groq import Groq # Import Groq
+from groq import Groq
+import json # Import the JSON library
+import traceback
 
-# --- Initialize the Flask App ---
+# --- Initialize the Flask App & API Clients ---
 app = Flask(__name__)
 CORS(app)
 
-# --- Initialize API Clients ---
-# Google Vision client will use the secret file
-vision_client = vision.ImageAnnotatorClient() 
-# Groq client will use the environment variable
+vision_client = vision.ImageAnnotatorClient()
 groq_client = Groq(api_key=os.environ.get("GROQ_API_KEY"))
 
 # --- API Functions ---
@@ -31,8 +30,8 @@ def extract_data_with_groq_ai(text_content):
         messages=[
             {
                 "role": "system",
-                "content": """You are an expert medical data extraction assistant. From the user's text, which is from a French medical prescription, extract the information into a valid JSON object and nothing else. Do not add any extra explanations or markdown formatting.
-
+                "content": """You are an expert medical data extraction assistant. From the user's text, which is from a French medical prescription, extract the information into a valid JSON object and nothing else. Do not add any extra explanations or markdown formatting like ```json.
+                
                 The JSON object must have these keys:
                 - "doctor_name"
                 - "patient_name"
@@ -47,13 +46,30 @@ def extract_data_with_groq_ai(text_content):
                 "content": f"Here is the prescription text:\n\n---\n{text_content}\n---",
             }
         ],
-        # Llama 3 is a powerful model available on Groq
-        model="llama3-8b-8192", 
+        model="llama3-8b-8192",
     )
     
     response_text = chat_completion.choices[0].message.content
-    print("Received structured data from Groq.")
-    return response_text
+    print("Received raw response from Groq:", response_text)
+
+    # --- THIS IS THE NEW, ROBUST PARSING LOGIC ---
+    try:
+        # Find the start and end of the JSON object
+        json_start = response_text.find('{')
+        json_end = response_text.rfind('}') + 1
+        
+        if json_start == -1 or json_end == 0:
+            raise ValueError("No JSON object found in the AI response.")
+
+        # Extract and parse the JSON string
+        json_string = response_text[json_start:json_end]
+        parsed_json = json.loads(json_string)
+        print("Successfully parsed JSON from AI response.")
+        return parsed_json
+    except (json.JSONDecodeError, ValueError) as e:
+        print(f"!!! Could not parse JSON from AI response: {e} !!!")
+        return {"error": "AI failed to generate valid structured data."}
+    # --- END OF NEW LOGIC ---
 
 # --- API Endpoint ---
 @app.route('/process_image', methods=['POST'])
@@ -65,21 +81,11 @@ def process_image_endpoint():
         return jsonify({"error": "No selected file"}), 400
     try:
         image_content = file.read()
-        
-        # Step 1: Use Google Vision to get perfect text
         ocr_text = extract_text_with_google_vision(image_content)
+        structured_data = extract_data_with_groq_ai(ocr_text)
         
-        # Step 2: Use Groq AI to understand the text and extract data
-        structured_data_json = extract_data_with_groq_ai(ocr_text)
-        
-        # The AI returns a JSON string, so we return it directly
-        return app.response_class(
-            response=structured_data_json,
-            status=200,
-            mimetype='application/json'
-        )
+        return jsonify(structured_data) # Use Flask's jsonify for a proper response
     except Exception as e:
-        import traceback
         print("!!! A SERVER ERROR OCCURRED !!!")
         print(traceback.format_exc())
         return jsonify({"error": f"An internal server error occurred: {e}"}), 500
