@@ -2,13 +2,20 @@ import os
 from flask import Flask, request, jsonify
 from flask_cors import CORS
 from google.cloud import vision
+import vertexai
+from vertexai.generative_models import GenerativeModel
 import re
+import traceback
 
 # --- Initialize the Flask App ---
 app = Flask(__name__)
 CORS(app)
 
-# --- Data Extraction Code ---
+# --- Define Google Cloud Project Details ---
+GCP_PROJECT_ID = "acoustic-bridge-465311-v9"
+GCP_LOCATION = "us-central1" # A common, stable region for AI models
+
+# --- Function to use Google Vision API for OCR ---
 def extract_text_with_google_vision(image_content):
     """Uses Google Cloud Vision API for superior OCR."""
     client = vision.ImageAnnotatorClient()
@@ -18,81 +25,40 @@ def extract_text_with_google_vision(image_content):
         raise Exception(response.error.message)
     return response.text_annotations[0].description if response.text_annotations else ""
 
-def parse_medical_data_locally(text):
+# --- Function to use Gemini AI for Data Extraction ---
+def extract_data_with_gemini(text_content):
+    """Uses the Gemini model via Vertex AI to understand and structure the text."""
+    
+    # Initialize Vertex AI
+    vertexai.init(project=GCP_PROJECT_ID, location=GCP_LOCATION)
+    
+    # Use a stable and widely available Gemini model
+    model = GenerativeModel("gemini-1.0-pro")
+
+    # The prompt asking the AI what to do
+    prompt = f"""
+    You are an expert medical data extraction assistant. From the following medical prescription text, extract the information into a valid JSON format. The prescription is in French. Do not include the ```json markdown wrapper in your response.
+
+    Here are the fields to extract:
+    - "doctor_name": The full name of the doctor. Find the most specific name, not just the title.
+    - "patient_name": The full name of the patient (first and last).
+    - "prescription_date": The date the prescription was written.
+    - "patient_age": The patient's age, if available.
+    - "patient_dob": The patient's date of birth, if available.
+    - "medications": A list of all medications. Each item in the list should be an object with two keys: "name" (the full name and dosage of the medication) and "dosage_and_frequency" (the instructions on how to take it).
+
+    Prescription Text to Analyze:
+    ---
+    {text_content}
+    ---
     """
-    Parses clean text with the most effective rules we developed.
-    """
-    structured_data = {
-        "doctor_name": "Not found",
-        "patient_name": "Not found",
-        "prescription_date": "Not found",
-        "patient_age": "Not found",
-        "patient_dob": "Not found",
-        "medications": []
-    }
+
+    response = model.generate_content(prompt)
     
-    lines = [line.strip() for line in text.split('\n') if line.strip()]
+    # Clean up the response to get only the JSON part
+    cleaned_response = response.text.strip().replace("```json", "").replace("```", "")
     
-    patient_parts = {}
-    headers_to_ignore = ["Docteur", "Spécialiste", "Tél", "Nom:", "Prénom:", "Age", "ORDONNANCE", "Jdioula", "Date naissance"]
-
-    for i, line in enumerate(lines):
-        # Doctor Extraction
-        if line.lower().startswith("docteur ") or line.lower().startswith("dr "):
-            structured_data["doctor_name"] = line
-        
-        # Date Extraction
-        date_match = re.search(r'\d{2}/\d{2}/\d{4}', line)
-        if date_match:
-            structured_data["prescription_date"] = date_match.group(0)
-
-        # Patient Name Extraction (handles different formats)
-        if "Nom & Prénom :" in line:
-            structured_data["patient_name"] = line.split(":")[-1].strip()
-        elif line.lower().startswith("nom :") and ":" in line:
-            patient_parts['last_name'] = line.split(":")[-1].strip()
-        elif line.lower().startswith("prénom :") and ":" in line:
-            patient_parts['first_name'] = line.split(":")[-1].strip()
-        
-        # Age and Date of Birth Extraction
-        if line.lower().startswith("age :"):
-            structured_data["patient_age"] = line.split(":")[-1].strip()
-        elif "date naissance" in line.lower():
-             structured_data["patient_dob"] = line.split(":")[-1].strip()
-
-    # Combine patient name parts
-    if structured_data["patient_name"] == "Not found":
-        if 'last_name' in patient_parts or 'first_name' in patient_parts:
-            structured_data["patient_name"] = f"{patient_parts.get('first_name', '')} {patient_parts.get('last_name', '')}".strip()
-    
-    if structured_data["patient_name"] != "Not found":
-        headers_to_ignore.extend(structured_data["patient_name"].upper().split())
-
-    # Medication Extraction
-    try:
-        start_index = lines.index("ORDONNANCE") + 1
-    except ValueError:
-        start_index = 0
-
-    for i in range(start_index, len(lines)):
-        line = lines[i]
-        # Regex to find lines that are likely medications
-        med_pattern = re.compile(r'([A-Z]{3,}.*\s(\d|CP|GEL|UI|B\.O\.N))')
-        
-        if med_pattern.search(line) and not any(header in line for header in headers_to_ignore):
-            name = re.sub(r'\s+01\s+boite\.?$', '', line).strip()
-            instruction = "Not specified"
-            if i + 1 < len(lines):
-                next_line = lines[i+1]
-                if next_line and (next_line[0].isdigit() or next_line.lower().startswith(("par", "à", "au"))):
-                    instruction = next_line
-            
-            structured_data["medications"].append({
-                "name": name, 
-                "dosage_and_frequency": instruction
-            })
-            
-    return structured_data
+    return cleaned_response
 
 # --- Define the API Endpoint ---
 @app.route('/process_image', methods=['POST'])
@@ -104,14 +70,24 @@ def process_image_endpoint():
         return jsonify({"error": "No selected file"}), 400
     try:
         image_content = file.read()
+        
+        # Step 1: Use Google Vision to get perfect text
         ocr_text = extract_text_with_google_vision(image_content)
-        structured_data = parse_medical_data_locally(ocr_text)
-        return jsonify(structured_data), 200
+        
+        # Step 2: Use Gemini to understand the text and extract data
+        structured_data_json = extract_data_with_gemini(ocr_text)
+        
+        # The AI returns a JSON string, so we return it directly
+        # We need to set the content type to application/json
+        return app.response_class(
+            response=structured_data_json,
+            status=200,
+            mimetype='application/json'
+        )
     except Exception as e:
-        import traceback
         print("!!! A SERVER ERROR OCCURRED !!!")
         print(traceback.format_exc())
-        return jsonify({"error": "An internal server error occurred."}), 500
+        return jsonify({"error": f"An internal server error occurred: {e}"}), 500
 
 if __name__ == '__main__':
     app.run(debug=True)
