@@ -2,90 +2,58 @@ import os
 from flask import Flask, request, jsonify
 from flask_cors import CORS
 from google.cloud import vision
-import re
-import spacy
-from spacy.matcher import Matcher
+from groq import Groq # Import Groq
 
-# --- Initialize Flask App and SpaCy ---
+# --- Initialize the Flask App ---
 app = Flask(__name__)
 CORS(app)
 
-# Load the French spaCy model
-try:
-    nlp = spacy.load("fr_core_news_sm")
-except OSError:
-    # This will run on Render during the build process
-    print("Downloading spaCy model...")
-    spacy.cli.download("fr_core_news_sm")
-    nlp = spacy.load("fr_core_news_sm")
+# --- Initialize API Clients ---
+# Google Vision client will use the secret file
+vision_client = vision.ImageAnnotatorClient() 
+# Groq client will use the environment variable
+groq_client = Groq(api_key=os.environ.get("GROQ_API_KEY"))
 
 # --- API Functions ---
 def extract_text_with_google_vision(image_content):
     """Uses Google Cloud Vision API for superior OCR."""
-    client = vision.ImageAnnotatorClient()
     image = vision.Image(content=image_content)
-    response = client.text_detection(image=image)
+    response = vision_client.text_detection(image=image)
     if response.error.message:
         raise Exception(response.error.message)
     return response.text_annotations[0].description if response.text_annotations else ""
 
-def parse_data_with_spacy(text):
-    """Parses clean text with spaCy's Matcher for high accuracy."""
-    doc = nlp(text)
-    matcher = Matcher(nlp.vocab)
+def extract_data_with_groq_ai(text_content):
+    """Uses a Groq language model to understand and structure the text."""
+    print("Sending text to Groq for analysis...")
     
-    structured_data = {
-        "doctor_name": "Not found",
-        "patient_name": "Not found",
-        "prescription_date": "Not found",
-        "patient_age": "Not found",
-        "patient_dob": "Not found",
-        "medications": []
-    }
+    chat_completion = groq_client.chat.completions.create(
+        messages=[
+            {
+                "role": "system",
+                "content": """You are an expert medical data extraction assistant. From the user's text, which is from a French medical prescription, extract the information into a valid JSON object and nothing else. Do not add any extra explanations or markdown formatting.
 
-    # Pattern for Doctor: "Docteur" or "Dr." followed by Proper Nouns
-    doctor_pattern = [{"LOWER": {"in": ["docteur", "dr", "dr."]}}, {"POS": "PROPN", "OP": "+"}]
-    # Pattern for Patient: "Nom" or "Prénom" followed by a colon and Proper Nouns
-    patient_pattern = [{"LOWER": {"in": ["nom", "prénom"]}}, {"TEXT": ":"}, {"POS": "PROPN", "OP": "+"}]
-    # Pattern for Date: A specific regex match
-    date_pattern = [{"TEXT": {"REGEX": r"\d{2}/\d{2}/\d{4}"}}]
-
-    matcher.add("DOCTOR", [doctor_pattern])
-    matcher.add("PATIENT", [patient_pattern])
-    matcher.add("DATE", [date_pattern])
-
-    matches = matcher(doc)
+                The JSON object must have these keys:
+                - "doctor_name"
+                - "patient_name"
+                - "prescription_date"
+                - "patient_age"
+                - "patient_dob"
+                - "medications": A list of objects, where each object has "name" and "dosage_and_frequency".
+                """
+            },
+            {
+                "role": "user",
+                "content": f"Here is the prescription text:\n\n---\n{text_content}\n---",
+            }
+        ],
+        # Llama 3 is a powerful model available on Groq
+        model="llama3-8b-8192", 
+    )
     
-    patient_parts = []
-    for match_id, start, end in matches:
-        string_id = nlp.vocab.strings[match_id]
-        span = doc[start:end]
-        if string_id == "DOCTOR":
-            structured_data["doctor_name"] = span.text
-        elif string_id == "PATIENT":
-            patient_parts.append(span.text.split(":")[-1].strip())
-        elif string_id == "DATE":
-            structured_data["prescription_date"] = span.text
-
-    if patient_parts:
-        structured_data["patient_name"] = " ".join(patient_parts)
-
-    # Use regex for medications as it's often more flexible for drug names
-    lines = text.split('\n')
-    for i, line in enumerate(lines):
-        med_match = re.match(r'^\d+\)?\s*(.*?)(?:\.\s*(.*))?$', line, re.IGNORECASE)
-        if med_match:
-            name = med_match.group(1).strip()
-            instruction = med_match.group(2) or ""
-            if "QSP" in name: name = name.split("QSP")[0].strip()
-            if not instruction.strip() and i + 1 < len(lines):
-                next_line = lines[i+1]
-                if not (re.match(r'^\d+\)', next_line.lstrip()) or "QSP" in next_line):
-                    instruction = next_line
-            if "@" not in name:
-                structured_data["medications"].append({"name": name, "dosage_and_frequency": instruction.strip() if instruction else "Not specified"})
-
-    return structured_data
+    response_text = chat_completion.choices[0].message.content
+    print("Received structured data from Groq.")
+    return response_text
 
 # --- API Endpoint ---
 @app.route('/process_image', methods=['POST'])
@@ -97,9 +65,19 @@ def process_image_endpoint():
         return jsonify({"error": "No selected file"}), 400
     try:
         image_content = file.read()
+        
+        # Step 1: Use Google Vision to get perfect text
         ocr_text = extract_text_with_google_vision(image_content)
-        structured_data = parse_data_with_spacy(ocr_text)
-        return jsonify(structured_data), 200
+        
+        # Step 2: Use Groq AI to understand the text and extract data
+        structured_data_json = extract_data_with_groq_ai(ocr_text)
+        
+        # The AI returns a JSON string, so we return it directly
+        return app.response_class(
+            response=structured_data_json,
+            status=200,
+            mimetype='application/json'
+        )
     except Exception as e:
         import traceback
         print("!!! A SERVER ERROR OCCURRED !!!")
