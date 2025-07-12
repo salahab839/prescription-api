@@ -2,4 +2,3 @@ Flask
 gunicorn
 google-cloud-vision
 Flask-Cors
-groq
