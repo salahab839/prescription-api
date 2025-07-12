@@ -2,76 +2,99 @@ import os
 from flask import Flask, request, jsonify
 from flask_cors import CORS
 from google.cloud import vision
-from groq import Groq
-import json # Import the JSON library
-import traceback
+import re
 
-# --- Initialize the Flask App & API Clients ---
+# --- Initialize the Flask App ---
 app = Flask(__name__)
 CORS(app)
 
-vision_client = vision.ImageAnnotatorClient()
-groq_client = Groq(api_key=os.environ.get("GROQ_API_KEY"))
-
-# --- API Functions ---
+# --- Data Extraction Code ---
 def extract_text_with_google_vision(image_content):
     """Uses Google Cloud Vision API for superior OCR."""
+    client = vision.ImageAnnotatorClient()
     image = vision.Image(content=image_content)
-    response = vision_client.text_detection(image=image)
+    response = client.text_detection(image=image)
     if response.error.message:
         raise Exception(response.error.message)
     return response.text_annotations[0].description if response.text_annotations else ""
 
-def extract_data_with_groq_ai(text_content):
-    """Uses a Groq language model to understand and structure the text."""
-    print("Sending text to Groq for analysis...")
+def parse_medical_data_locally(text):
+    """
+    Parses clean text with the most effective rules we developed.
+    """
+    structured_data = {
+        "doctor_name": "Not found",
+        "patient_name": "Not found",
+        "prescription_date": "Not found",
+        "patient_age": "Not found",
+        "patient_dob": "Not found",
+        "medications": []
+    }
     
-    chat_completion = groq_client.chat.completions.create(
-        messages=[
-            {
-                "role": "system",
-                "content": """You are an expert medical data extraction assistant. From the user's text, which is from a French medical prescription, extract the information into a valid JSON object and nothing else. Do not add any extra explanations or markdown formatting like ```json.
-                
-                The JSON object must have these keys:
-                - "doctor_name"
-                - "patient_name"
-                - "prescription_date"
-                - "patient_age"
-                - "patient_dob"
-                - "medications": A list of objects, where each object has "name" and "dosage_and_frequency".
-                """
-            },
-            {
-                "role": "user",
-                "content": f"Here is the prescription text:\n\n---\n{text_content}\n---",
-            }
-        ],
-        model="llama3-8b-8192",
-    )
+    lines = [line.strip() for line in text.split('\n') if line.strip()]
     
-    response_text = chat_completion.choices[0].message.content
-    print("Received raw response from Groq:", response_text)
+    patient_parts = {}
+    headers_to_ignore = ["Docteur", "Spécialiste", "Tél", "Nom:", "Prénom:", "Age", "ORDONNANCE", "Jdioula", "Date naissance"]
 
-    # --- THIS IS THE NEW, ROBUST PARSING LOGIC ---
-    try:
-        # Find the start and end of the JSON object
-        json_start = response_text.find('{')
-        json_end = response_text.rfind('}') + 1
+    for i, line in enumerate(lines):
+        # Doctor Extraction
+        if line.lower().startswith("docteur ") or line.lower().startswith("dr "):
+            structured_data["doctor_name"] = line
         
-        if json_start == -1 or json_end == 0:
-            raise ValueError("No JSON object found in the AI response.")
+        # Date Extraction
+        date_match = re.search(r'\d{2}/\d{2}/\d{4}', line)
+        if date_match:
+            structured_data["prescription_date"] = date_match.group(0)
 
-        # Extract and parse the JSON string
-        json_string = response_text[json_start:json_end]
-        parsed_json = json.loads(json_string)
-        print("Successfully parsed JSON from AI response.")
-        return parsed_json
-    except (json.JSONDecodeError, ValueError) as e:
-        print(f"!!! Could not parse JSON from AI response: {e} !!!")
-        return {"error": "AI failed to generate valid structured data."}
-    # --- END OF NEW LOGIC ---
+        # Patient Name Extraction (handles different formats)
+        if "Nom & Prénom :" in line:
+            structured_data["patient_name"] = line.split(":")[-1].strip()
+        elif line.lower().startswith("nom :") and ":" in line:
+            patient_parts['last_name'] = line.split(":")[-1].strip()
+        elif line.lower().startswith("prénom :") and ":" in line:
+            patient_parts['first_name'] = line.split(":")[-1].strip()
+        
+        # Age and Date of Birth Extraction
+        if line.lower().startswith("age :"):
+            structured_data["patient_age"] = line.split(":")[-1].strip()
+        elif "date naissance" in line.lower():
+             structured_data["patient_dob"] = line.split(":")[-1].strip()
 
-# --- API Endpoint ---
+    # Combine patient name parts
+    if structured_data["patient_name"] == "Not found":
+        if 'last_name' in patient_parts or 'first_name' in patient_parts:
+            structured_data["patient_name"] = f"{patient_parts.get('first_name', '')} {patient_parts.get('last_name', '')}".strip()
+    
+    if structured_data["patient_name"] != "Not found":
+        headers_to_ignore.extend(structured_data["patient_name"].upper().split())
+
+    # Medication Extraction
+    try:
+        start_index = lines.index("ORDONNANCE") + 1
+    except ValueError:
+        start_index = 0
+
+    for i in range(start_index, len(lines)):
+        line = lines[i]
+        # Regex to find lines that are likely medications
+        med_pattern = re.compile(r'([A-Z]{3,}.*\s(\d|CP|GEL|UI|B\.O\.N))')
+        
+        if med_pattern.search(line) and not any(header in line for header in headers_to_ignore):
+            name = re.sub(r'\s+01\s+boite\.?$', '', line).strip()
+            instruction = "Not specified"
+            if i + 1 < len(lines):
+                next_line = lines[i+1]
+                if next_line and (next_line[0].isdigit() or next_line.lower().startswith(("par", "à", "au"))):
+                    instruction = next_line
+            
+            structured_data["medications"].append({
+                "name": name, 
+                "dosage_and_frequency": instruction
+            })
+            
+    return structured_data
+
+# --- Define the API Endpoint ---
 @app.route('/process_image', methods=['POST'])
 def process_image_endpoint():
     if 'file' not in request.files:
@@ -82,13 +105,13 @@ def process_image_endpoint():
     try:
         image_content = file.read()
         ocr_text = extract_text_with_google_vision(image_content)
-        structured_data = extract_data_with_groq_ai(ocr_text)
-        
-        return jsonify(structured_data) # Use Flask's jsonify for a proper response
+        structured_data = parse_medical_data_locally(ocr_text)
+        return jsonify(structured_data), 200
     except Exception as e:
+        import traceback
         print("!!! A SERVER ERROR OCCURRED !!!")
         print(traceback.format_exc())
-        return jsonify({"error": f"An internal server error occurred: {e}"}), 500
+        return jsonify({"error": "An internal server error occurred."}), 500
 
 if __name__ == '__main__':
     app.run(debug=True)
