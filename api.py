@@ -36,9 +36,9 @@ def extract_vignette_data_with_groq(text_content):
                 "content": """You are an expert at reading French medication vignettes (the small price stickers). From the user's text, extract the information into a valid JSON object and nothing else.
 
                 The JSON object must have these exact keys:
-                - "nom": The commercial name of the medication.
+                - "nom": The commercial name of the medication, followed by its dosage. It must NOT be the DCI name. For example: "DOLIPRANE 500MG".
                 - "dosage": The dosage information (e.g., "500MG", "100 MG/5 ML").
-                - "conditionnement": The packaging information, which is the number of units in the package (e.g., "B/30 COMP", "FL/150ML").
+                - "conditionnement": The packaging information, which is the number of units in the package. It should be formatted like "B/20" for a box of 20 units. For example: "B/30 COMP", "FL/150ML".
                 - "ppa": The Public Pharmacy Price (Prix Public Algérie), which is a number, possibly with decimals.
                 
                 If a field is not present, return an empty string "" for its value.
