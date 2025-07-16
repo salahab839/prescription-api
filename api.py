@@ -34,12 +34,12 @@ def extract_vignette_data_with_groq(text_content):
             {
                 "role": "system",
                 "content": """You are an expert at reading French medication vignettes (the small price stickers). From the user's text, extract the information into a valid JSON object and nothing else.
-                
+
                 The JSON object must have these exact keys:
                 - "nom": The commercial name of the medication.
                 - "dosage": The dosage information (e.g., "500MG", "100 MG/5 ML").
-                - "conditionnement": The packaging information (e.g., "B/30 COMP", "FL/150ML").
-                - "ppa": The Public Pharmacy Price, which is a number, possibly with decimals.
+                - "conditionnement": The packaging information, which is the number of units in the package (e.g., "B/30 COMP", "FL/150ML").
+                - "ppa": The Public Pharmacy Price (Prix Public Algérie), which is a number, possibly with decimals.
                 
                 If a field is not present, return an empty string "" for its value.
                 """
@@ -61,7 +61,6 @@ def extract_vignette_data_with_groq(text_content):
 @app.route('/process_prescription', methods=['POST'])
 def process_prescription_endpoint():
     # This endpoint remains for processing full prescriptions
-    # (For simplicity, this example reuses the vignette logic, but you would have your full prescription logic here)
     if 'file' not in request.files:
         return jsonify({"error": "No file part"}), 400
     file = request.files['file']
@@ -70,8 +69,8 @@ def process_prescription_endpoint():
     try:
         image_content = file.read()
         ocr_text = extract_text_with_google_vision(image_content)
-        # In a real scenario, you'd have a separate Gemini/Groq call here for prescriptions
-        # For now, we'll just return a placeholder
+        # For now, we'll just return a placeholder for the prescription part
+        # You would add your full Gemini/Groq logic here for prescriptions
         return jsonify({"message": "Prescription endpoint called. Implement prescription logic here.", "text": ocr_text})
     except Exception as e:
         print(f"!!! ERROR IN PRESCRIPTION PROCESSING: {e} !!!")
