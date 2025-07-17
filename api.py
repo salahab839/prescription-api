@@ -68,8 +68,15 @@ def process_image_data(image_content):
     print("[CHECKPOINT B] Succès. Texte extrait.")
 
     print("[CHECKPOINT C] Appel de Groq.")
-    system_prompt = "Vous êtes un expert en lecture de vignettes de médicaments françaises..."
-    chat_completion = groq_client.chat.completions.create(messages=[{"role": "system", "content": system_prompt}, {"role": "user", "content": f"Texte: {ocr_text}"}], model="llama3-8b-8192", response_format={"type": "json_object"})
+    # --- THIS IS THE CORRECTED PROMPT ---
+    # It now includes the required "JSON" keyword for the API.
+    system_prompt = """
+    Vous êtes un expert en lecture de vignettes de médicaments françaises. Votre unique tâche est de retourner un objet JSON valide.
+    Ne retournez que l'objet JSON, sans aucun texte supplémentaire ni formatage markdown.
+
+    Voici les clés que vous devez utiliser : "nom", "dosage", "conditionnement", "ppa".
+    """
+    chat_completion = groq_client.chat.completions.create(messages=[{"role": "system", "content": system_prompt}, {"role": "user", "content": f"Texte à analyser:\n---\n{ocr_text}\n---"}], model="llama3-8b-8192", response_format={"type": "json_object"})
     ai_data = json.loads(chat_completion.choices[0].message.content)
     print("[CHECKPOINT C] Succès. Données de l'IA reçues.")
 
