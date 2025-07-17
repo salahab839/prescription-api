@@ -79,22 +79,37 @@ def phone_upload_page(session_id):
 
 @app.route('/api/upload-by-session/<session_id>', methods=['POST'])
 def upload_by_session(session_id):
+    # --- THIS IS THE EDITED FUNCTION WITH BETTER LOGGING ---
+    print(f"\n--- Requête d'upload reçue pour la session: {session_id} ---")
     if session_id not in SESSIONS:
+        print("ERREUR: Session ID non trouvée.")
         return jsonify({"error": "Session invalide ou expirée"}), 404
     if 'file' not in request.files:
+        print("ERREUR: 'file' non trouvé dans la requête d'upload.")
         return jsonify({"error": "Aucun fichier"}), 400
     
     file = request.files['file']
-    image_content = file.read()
     
-    # Process the image and store the result in the session
     try:
+        print(f"[SESSION UPLOAD] Lecture du contenu de l'image...")
+        image_content = file.read()
+        print(f"[SESSION UPLOAD] Image lue, {len(image_content)} bytes. Traitement en cours...")
+        
         processed_data = process_image_data(image_content)
+        
         SESSIONS[session_id]['status'] = 'completed'
         SESSIONS[session_id]['data'] = processed_data
-        print(f"Image received and processed for session: {session_id}")
+        print(f"Image reçue et traitée avec succès pour la session: {session_id}")
         return jsonify({"status": "success"})
     except Exception as e:
+        # This will now print the full error to the logs
+        print(f"!!!!!! ERREUR DANS L'UPLOAD PAR SESSION !!!!!!")
+        print(f"Type de l'erreur: {type(e).__name__}")
+        print(f"Message de l'erreur: {e}")
+        print("--- Traceback complet ---")
+        traceback.print_exc()
+        print("--------------------------")
+        
         SESSIONS[session_id]['status'] = 'error'
         SESSIONS[session_id]['data'] = str(e)
         return jsonify({"error": "Erreur lors du traitement de l'image"}), 500
@@ -107,13 +122,15 @@ def check_session(session_id):
     session_info = SESSIONS[session_id]
     # Clean up old sessions after some time
     if time.time() - session_info.get("timestamp", 0) > 600: # 10 minutes
-        del SESSIONS[session_id]
+        if session_id in SESSIONS:
+            del SESSIONS[session_id]
         return jsonify({"status": "expired"}), 410
 
     if session_info['status'] == 'completed':
         # Return the data and clear the session
         data_to_return = session_info['data']
-        del SESSIONS[session_id]
+        if session_id in SESSIONS:
+            del SESSIONS[session_id]
         return jsonify({"status": "completed", "data": data_to_return})
     else:
         return jsonify({"status": session_info['status']})
