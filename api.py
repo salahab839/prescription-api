@@ -72,39 +72,63 @@ def process_image_data(image_content):
     ai_data = json.loads(chat_completion.choices[0].message.content)
     print("[CHECKPOINT C] Succès. Données de l'IA reçues.")
 
-    def get_verified_response(db_row, score, status="Vérifié"):
-        return {"nom": db_row.get('Nom Commercial'), "dosage": db_row.get('Dosage'), "conditionnement": db_row.get('Présentation'), "ppa": ai_data.get('ppa'), "match_score": score, "status": status}
-
+    # --- THIS IS THE CORRECTED LOGIC ---
+    # We define the final response dictionary here and modify it based on the results.
+    
+    # Default to the raw AI data
+    response_data = {
+        "nom": ai_data.get('nom'),
+        "dosage": ai_data.get('dosage'),
+        "conditionnement": ai_data.get('conditionnement'),
+        "ppa": ai_data.get('ppa'),
+        "match_score": 0,
+        "status": "Non Vérifié"
+    }
+    
     # --- Stage 1: Attempt a full match ---
     full_vignette_sig = normalize_string(f"{ai_data.get('nom','')} {ai_data.get('dosage','')} {ai_data.get('conditionnement','')}")
     best_full_match, score_full = process.extractOne(full_vignette_sig, DB_SIGNATURE_MAP.keys(), scorer=fuzz.token_set_ratio)
     print(f"[DEBUG] Score Stage 1: {score_full}%")
 
-    # --- ADJUSTED THRESHOLD ---
     if score_full >= 80:
         verified_data_row = DB_SIGNATURE_MAP[best_full_match]
-        return get_verified_response(verified_data_row, score_full)
+        # Overwrite the AI data with the clean data from the database
+        response_data["nom"] = verified_data_row.get('Nom Commercial')
+        response_data["dosage"] = verified_data_row.get('Dosage')
+        response_data["conditionnement"] = verified_data_row.get('Présentation')
+        response_data["match_score"] = score_full
+        response_data["status"] = "Vérifié"
+        print("[CHECKPOINT F] Succès. Correspondance trouvée au Stage 1.")
+        return response_data
 
     # --- Stage 2: Fallback to smart search ---
     dosage_pres_sig = normalize_string(f"{ai_data.get('dosage','')} {ai_data.get('conditionnement','')}")
     best_dosage_match, score_dosage = process.extractOne(dosage_pres_sig, DB_DOSAGE_PRES_MAP.keys())
     print(f"[DEBUG] Score Stage 2 (Dosage/Pres): {score_dosage}%")
     
-    if score_dosage >= 90: # Adjusted threshold
+    if score_dosage >= 90:
         candidate_drugs = DB_DOSAGE_PRES_MAP[best_dosage_match]
         ocr_name = normalize_string(ai_data.get('nom', ''))
         candidate_names = {normalize_string(drug.get('Nom Commercial')): drug for drug in candidate_drugs}
         best_name_match, score_name = process.extractOne(ocr_name, candidate_names.keys())
         print(f"[DEBUG] Score Stage 2 (Name): {score_name}%")
         
-        # --- ADJUSTED THRESHOLD ---
         if score_name >= 65:
             verified_data_row = candidate_names[best_name_match]
             final_score = int((score_dosage * 0.6) + (score_name * 0.4))
-            return get_verified_response(verified_data_row, final_score, status="Auto-Corrigé")
+            # Overwrite the AI data with the clean data from the database
+            response_data["nom"] = verified_data_row.get('Nom Commercial')
+            response_data["dosage"] = verified_data_row.get('Dosage')
+            response_data["conditionnement"] = verified_data_row.get('Présentation')
+            response_data["match_score"] = final_score
+            response_data["status"] = "Auto-Corrigé"
+            print("[CHECKPOINT F] Succès. Correspondance trouvée au Stage 2.")
+            return response_data
 
+    # If no match was found, return the original raw AI data
     print("[CHECKPOINT F] Aucune correspondance trouvée.")
-    return {"nom": ai_data.get('nom'), "dosage": ai_data.get('dosage'), "conditionnement": ai_data.get('conditionnement'), "ppa": ai_data.get('ppa'), "match_score": score_full, "status": "Non Vérifié"}
+    response_data['match_score'] = score_full # Use the initial score
+    return response_data
 
 # --- All API Routes (No Changes) ---
 @app.route('/api/create-session', methods=['POST'])
