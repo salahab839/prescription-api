@@ -85,7 +85,18 @@ def process_image_data(image_content):
     """
     chat_completion = groq_client.chat.completions.create(messages=[{"role": "system", "content": system_prompt}, {"role": "user", "content": f"Texte à analyser:\n---\n{ocr_text}\n---"}], model="llama3-8b-8192", response_format={"type": "json_object"})
     ai_data = json.loads(chat_completion.choices[0].message.content)
-    print(f"[CHECKPOINT C] Données IA: {ai_data}")
+    print(f"[CHECKPOINT C] Données IA (brutes): {ai_data}")
+
+    # --- NEW: Clean and format the PPA value ---
+    ppa_raw = str(ai_data.get('ppa', ''))
+    # Keep only digits, period, and comma
+    ppa_numeric_str = re.sub(r'[^0-9.,]', '', ppa_raw)
+    # Replace period with comma for French/Algerian locale
+    ppa_formatted = ppa_numeric_str.replace('.', ',')
+    # Update the dictionary with the clean value
+    ai_data['ppa'] = ppa_formatted
+    print(f"[CHECKPOINT C.1] PPA formaté: {ai_data['ppa']}")
+    # --- END OF FIX ---
 
     def get_verified_response(db_row, score, status="Vérifié"):
         return {"nom": db_row.get('Nom Commercial'), "dosage": db_row.get('Dosage'), "conditionnement": db_row.get('Présentation'), "ppa": ai_data.get('ppa'), "match_score": score, "status": status}
@@ -112,8 +123,6 @@ def process_image_data(image_content):
         # If there's only one variant for that name, it MUST be the correct one.
         if len(candidate_drugs) == 1:
             print("[DECISION] Succès via Chemin 2 (Variante unique).")
-            # We don't need to check the details score, we just use this one.
-            # But we can calculate it for user feedback.
             candidate_details_sig = normalize_string(build_reference_string(candidate_drugs[0], include_name=False))
             score_candidate_details = fuzz.token_set_ratio(ocr_details_sig, candidate_details_sig)
             final_score = int((score_name * 0.7) + (score_candidate_details * 0.3))
@@ -121,10 +130,9 @@ def process_image_data(image_content):
 
         # If there are multiple variants, we need to find the best one.
         candidate_details = {normalize_string(build_reference_string(drug, include_name=False)): drug for drug in candidate_drugs}
-        # Use a more robust scorer for this critical step
         best_candidate_details, score_candidate_details = process.extractOne(ocr_details_sig, candidate_details.keys(), scorer=fuzz.WRatio)
         
-        if score_candidate_details >= 75: # Higher confidence for details within the filtered list
+        if score_candidate_details >= 75:
             final_score = int((score_name * 0.6) + (score_candidate_details * 0.4))
             print(f"[DECISION] Succès via Chemin 2. Score final: {final_score}%")
             return get_verified_response(candidate_details[best_candidate_details], final_score, status="Auto-Corrigé")
