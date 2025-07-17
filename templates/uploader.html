@@ -1,0 +1,82 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Scanner Vignette</title>
+    <style>
+        body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; display: flex; justify-content: center; align-items: center; height: 100vh; margin: 0; background-color: #f0f2f5; }
+        .container { text-align: center; padding: 20px; background-color: white; border-radius: 12px; box-shadow: 0 4px 12px rgba(0,0,0,0.1); }
+        h1 { color: #333; }
+        p { color: #666; }
+        .upload-btn { display: inline-block; padding: 15px 30px; background-color: #007bff; color: white; font-size: 18px; font-weight: bold; border-radius: 8px; cursor: pointer; transition: background-color 0.2s; }
+        .upload-btn:hover { background-color: #0056b3; }
+        #file-input { display: none; }
+        #status { margin-top: 20px; font-weight: bold; }
+        .spinner { border: 4px solid #f3f3f3; border-top: 4px solid #007bff; border-radius: 50%; width: 30px; height: 30px; animation: spin 1s linear infinite; margin: 20px auto; display: none; }
+        @keyframes spin { 0% { transform: rotate(0deg); } 100% { transform: rotate(360deg); } }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>Scanner la Vignette</h1>
+        <p>L'image sera envoyée à votre application de bureau.</p>
+        <label for="file-input" class="upload-btn">
+            📷 Prendre une photo
+        </label>
+        <!-- This input opens the camera directly on mobile -->
+        <input id="file-input" type="file" accept="image/*" capture="environment">
+        <div class="spinner" id="spinner"></div>
+        <div id="status"></div>
+    </div>
+
+    <script>
+        const fileInput = document.getElementById('file-input');
+        const statusDiv = document.getElementById('status');
+        const spinner = document.getElementById('spinner');
+
+        // This gets the unique session ID from the URL
+        const sessionId = window.location.pathname.split('/').pop();
+
+        fileInput.addEventListener('change', (event) => {
+            const file = event.target.files[0];
+            if (!file) {
+                return;
+            }
+            uploadImage(file);
+        });
+
+        async function uploadImage(file) {
+            statusDiv.textContent = 'Envoi de l\'image...';
+            statusDiv.style.color = 'blue';
+            spinner.style.display = 'block';
+
+            const formData = new FormData();
+            formData.append('file', file);
+
+            try {
+                // The API endpoint includes the session ID
+                const response = await fetch(`/api/upload-by-session/${sessionId}`, {
+                    method: 'POST',
+                    body: formData,
+                });
+
+                if (!response.ok) {
+                    const errorResult = await response.json();
+                    throw new Error(errorResult.error || 'Erreur du serveur');
+                }
+
+                const result = await response.json();
+                statusDiv.textContent = '✅ Succès ! Vous pouvez fermer cette page.';
+                statusDiv.style.color = 'green';
+
+            } catch (error) {
+                statusDiv.textContent = `❌ Erreur: ${error.message}`;
+                statusDiv.style.color = 'red';
+            } finally {
+                spinner.style.display = 'none';
+            }
+        }
+    </script>
+</body>
+</html>
