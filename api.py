@@ -54,26 +54,18 @@ except Exception as e:
 
 
 def process_image_data(image_content):
-    """ Main processing logic with robust error handling. """
+    """ Main processing logic with robust error handling and adjusted thresholds. """
     print("[CHECKPOINT A] Début du traitement de l'image.")
     
-    # --- SAFER GOOGLE VISION CALL ---
-    print("[CHECKPOINT B] Appel de Google Vision.")
     response = vision_client.text_detection(image=vision.Image(content=image_content))
-    if response.error.message:
-        raise Exception(f"Erreur de l'API Google Vision: {response.error.message}")
-    if not response.text_annotations:
-        raise Exception("Aucun texte n'a été détecté dans l'image.")
+    if response.error.message: raise Exception(f"Erreur de l'API Google Vision: {response.error.message}")
+    if not response.text_annotations: raise Exception("Aucun texte n'a été détecté dans l'image.")
     ocr_text = response.text_annotations[0].description
     print("[CHECKPOINT B] Succès. Texte extrait.")
 
-    print("[CHECKPOINT C] Appel de Groq.")
-    # --- THIS IS THE CORRECTED PROMPT ---
-    # It now includes the required "JSON" keyword for the API.
     system_prompt = """
     Vous êtes un expert en lecture de vignettes de médicaments françaises. Votre unique tâche est de retourner un objet JSON valide.
     Ne retournez que l'objet JSON, sans aucun texte supplémentaire ni formatage markdown.
-
     Voici les clés que vous devez utiliser : "nom", "dosage", "conditionnement", "ppa".
     """
     chat_completion = groq_client.chat.completions.create(messages=[{"role": "system", "content": system_prompt}, {"role": "user", "content": f"Texte à analyser:\n---\n{ocr_text}\n---"}], model="llama3-8b-8192", response_format={"type": "json_object"})
@@ -84,23 +76,29 @@ def process_image_data(image_content):
         return {"nom": db_row.get('Nom Commercial'), "dosage": db_row.get('Dosage'), "conditionnement": db_row.get('Présentation'), "ppa": ai_data.get('ppa'), "match_score": score, "status": status}
 
     # --- Stage 1: Attempt a full match ---
-    print("[CHECKPOINT D] Début de la recherche - Stage 1.")
     full_vignette_sig = normalize_string(f"{ai_data.get('nom','')} {ai_data.get('dosage','')} {ai_data.get('conditionnement','')}")
     best_full_match, score_full = process.extractOne(full_vignette_sig, DB_SIGNATURE_MAP.keys(), scorer=fuzz.token_set_ratio)
-    if score_full >= 85:
+    print(f"[DEBUG] Score Stage 1: {score_full}%")
+
+    # --- ADJUSTED THRESHOLD ---
+    if score_full >= 80:
         verified_data_row = DB_SIGNATURE_MAP[best_full_match]
         return get_verified_response(verified_data_row, score_full)
 
     # --- Stage 2: Fallback to smart search ---
-    print("[CHECKPOINT E] Début de la recherche - Stage 2.")
     dosage_pres_sig = normalize_string(f"{ai_data.get('dosage','')} {ai_data.get('conditionnement','')}")
     best_dosage_match, score_dosage = process.extractOne(dosage_pres_sig, DB_DOSAGE_PRES_MAP.keys())
-    if score_dosage >= 95:
+    print(f"[DEBUG] Score Stage 2 (Dosage/Pres): {score_dosage}%")
+    
+    if score_dosage >= 90: # Adjusted threshold
         candidate_drugs = DB_DOSAGE_PRES_MAP[best_dosage_match]
         ocr_name = normalize_string(ai_data.get('nom', ''))
         candidate_names = {normalize_string(drug.get('Nom Commercial')): drug for drug in candidate_drugs}
         best_name_match, score_name = process.extractOne(ocr_name, candidate_names.keys())
-        if score_name >= 70:
+        print(f"[DEBUG] Score Stage 2 (Name): {score_name}%")
+        
+        # --- ADJUSTED THRESHOLD ---
+        if score_name >= 65:
             verified_data_row = candidate_names[best_name_match]
             final_score = int((score_dosage * 0.6) + (score_name * 0.4))
             return get_verified_response(verified_data_row, final_score, status="Auto-Corrigé")
