@@ -63,10 +63,21 @@ def process_image_data(image_content):
     ocr_text = response.text_annotations[0].description
     print("[CHECKPOINT B] Succès. Texte extrait.")
 
+    # --- THIS IS THE CORRECTED AND MORE ROBUST PROMPT ---
     system_prompt = """
     Vous êtes un expert en lecture de vignettes de médicaments françaises. Votre unique tâche est de retourner un objet JSON valide.
-    Ne retournez que l'objet JSON, sans aucun texte supplémentaire ni formatage markdown.
-    Voici les clés que vous devez utiliser : "nom", "dosage", "conditionnement", "ppa".
+    Ne retournez que l'objet JSON, sans aucun texte supplémentaire, commentaire, ou formatage markdown.
+    Assurez-vous que toutes les valeurs sont des chaînes de caractères (strings) valides entre guillemets.
+
+    Exemple de format JSON valide :
+    {
+      "nom": "DOLIPRANE",
+      "dosage": "1000 MG",
+      "conditionnement": "BTE/8",
+      "ppa": "195.00"
+    }
+
+    Utilisez les clés suivantes : "nom", "dosage", "conditionnement", "ppa".
     """
     chat_completion = groq_client.chat.completions.create(messages=[{"role": "system", "content": system_prompt}, {"role": "user", "content": f"Texte à analyser:\n---\n{ocr_text}\n---"}], model="llama3-8b-8192", response_format={"type": "json_object"})
     ai_data = json.loads(chat_completion.choices[0].message.content)
