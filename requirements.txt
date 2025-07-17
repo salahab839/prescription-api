@@ -2,5 +2,7 @@ Flask
 gunicorn
 google-cloud-vision
 Flask-Cors
-google-cloud-aiplatform
 groq
+pandas
+openpyxl
+thefuzz
