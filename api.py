@@ -31,115 +31,99 @@ def normalize_string(s):
     s = s.lower().replace('bte', 'b').replace('boite', 'b').replace('comprimés', 'cp').replace('comprimé', 'cp').replace('grammes', 'g').replace('gramme', 'g').replace('milligrammes', 'mg')
     s = re.sub(r'[^a-z0-9]', ' ', s); return re.sub(r'\s+', ' ', s).strip()
 
-def build_reference_string(row, include_name=True):
+def build_reference_string(row, include_name=True, include_details=True):
     name_part = row.get('Nom Commercial', '') if include_name else ''
-    dosage_part = row.get('Dosage', '')
-    presentation_part = row.get('Présentation', '')
+    dosage_part = row.get('Dosage', '') if include_details else ''
+    presentation_part = row.get('Présentation', '') if include_details else ''
     return f"{name_part} {dosage_part} {presentation_part}".strip()
 
 DB_SIGNATURE_MAP = {}
 DB_DOSAGE_PRES_MAP = {}
+DB_NAMES_MAP = {}
 try:
     df = pd.read_excel(DB_PATH) 
     for index, row in df.iterrows():
+        row_dict = row.to_dict()
         full_signature = normalize_string(build_reference_string(row))
-        DB_SIGNATURE_MAP[full_signature] = row.to_dict()
+        DB_SIGNATURE_MAP[full_signature] = row_dict
+        
         dosage_pres_signature = normalize_string(build_reference_string(row, include_name=False))
         if dosage_pres_signature not in DB_DOSAGE_PRES_MAP:
             DB_DOSAGE_PRES_MAP[dosage_pres_signature] = []
-        DB_DOSAGE_PRES_MAP[dosage_pres_signature].append(row.to_dict())
+        DB_DOSAGE_PRES_MAP[dosage_pres_signature].append(row_dict)
+        
+        name_signature = normalize_string(build_reference_string(row, include_details=False))
+        DB_NAMES_MAP[name_signature] = row_dict
+
     print(f"Base de données chargée avec {len(DB_SIGNATURE_MAP)} médicaments.")
 except Exception as e:
     print(f"ERREUR critique lors du chargement de la base de données : {e}")
 
 
 def process_image_data(image_content):
-    """ Main processing logic with robust error handling and adjusted thresholds. """
+    """ Main processing logic with a more powerful, multi-faceted verification system. """
     print("[CHECKPOINT A] Début du traitement de l'image.")
     
     response = vision_client.text_detection(image=vision.Image(content=image_content))
     if response.error.message: raise Exception(f"Erreur de l'API Google Vision: {response.error.message}")
     if not response.text_annotations: raise Exception("Aucun texte n'a été détecté dans l'image.")
     ocr_text = response.text_annotations[0].description
-    print("[CHECKPOINT B] Succès. Texte extrait.")
+    print(f"[CHECKPOINT B] Texte extrait: {ocr_text[:100]}...")
 
-    # --- THIS IS THE CORRECTED AND MORE ROBUST PROMPT ---
     system_prompt = """
     Vous êtes un expert en lecture de vignettes de médicaments françaises. Votre unique tâche est de retourner un objet JSON valide.
     Ne retournez que l'objet JSON, sans aucun texte supplémentaire, commentaire, ou formatage markdown.
     Assurez-vous que toutes les valeurs sont des chaînes de caractères (strings) valides entre guillemets.
-
     Exemple de format JSON valide :
-    {
-      "nom": "DOLIPRANE",
-      "dosage": "1000 MG",
-      "conditionnement": "BTE/8",
-      "ppa": "195.00"
-    }
-
+    { "nom": "DOLIPRANE", "dosage": "1000 MG", "conditionnement": "BTE/8", "ppa": "195.00" }
     Utilisez les clés suivantes : "nom", "dosage", "conditionnement", "ppa".
     """
     chat_completion = groq_client.chat.completions.create(messages=[{"role": "system", "content": system_prompt}, {"role": "user", "content": f"Texte à analyser:\n---\n{ocr_text}\n---"}], model="llama3-8b-8192", response_format={"type": "json_object"})
     ai_data = json.loads(chat_completion.choices[0].message.content)
-    print("[CHECKPOINT C] Succès. Données de l'IA reçues.")
+    print(f"[CHECKPOINT C] Données IA: {ai_data}")
 
-    # --- THIS IS THE CORRECTED LOGIC ---
-    # We define the final response dictionary here and modify it based on the results.
-    
-    # Default to the raw AI data
-    response_data = {
-        "nom": ai_data.get('nom'),
-        "dosage": ai_data.get('dosage'),
-        "conditionnement": ai_data.get('conditionnement'),
-        "ppa": ai_data.get('ppa'),
-        "match_score": 0,
-        "status": "Non Vérifié"
-    }
-    
-    # --- Stage 1: Attempt a full match ---
-    full_vignette_sig = normalize_string(f"{ai_data.get('nom','')} {ai_data.get('dosage','')} {ai_data.get('conditionnement','')}")
-    best_full_match, score_full = process.extractOne(full_vignette_sig, DB_SIGNATURE_MAP.keys(), scorer=fuzz.token_set_ratio)
-    print(f"[DEBUG] Score Stage 1: {score_full}%")
+    def get_verified_response(db_row, score, status="Vérifié"):
+        return {"nom": db_row.get('Nom Commercial'), "dosage": db_row.get('Dosage'), "conditionnement": db_row.get('Présentation'), "ppa": ai_data.get('ppa'), "match_score": score, "status": status}
 
-    if score_full >= 80:
-        verified_data_row = DB_SIGNATURE_MAP[best_full_match]
-        # Overwrite the AI data with the clean data from the database
-        response_data["nom"] = verified_data_row.get('Nom Commercial')
-        response_data["dosage"] = verified_data_row.get('Dosage')
-        response_data["conditionnement"] = verified_data_row.get('Présentation')
-        response_data["match_score"] = score_full
-        response_data["status"] = "Vérifié"
-        print("[CHECKPOINT F] Succès. Correspondance trouvée au Stage 1.")
-        return response_data
+    # --- NEW, MORE POWERFUL LOGIC ---
+    ocr_full_sig = normalize_string(f"{ai_data.get('nom','')} {ai_data.get('dosage','')} {ai_data.get('conditionnement','')}")
+    ocr_name_sig = normalize_string(ai_data.get('nom',''))
+    ocr_details_sig = normalize_string(f"{ai_data.get('dosage','')} {ai_data.get('conditionnement','')}")
 
-    # --- Stage 2: Fallback to smart search ---
-    dosage_pres_sig = normalize_string(f"{ai_data.get('dosage','')} {ai_data.get('conditionnement','')}")
-    best_dosage_match, score_dosage = process.extractOne(dosage_pres_sig, DB_DOSAGE_PRES_MAP.keys())
-    print(f"[DEBUG] Score Stage 2 (Dosage/Pres): {score_dosage}%")
-    
-    if score_dosage >= 90:
-        candidate_drugs = DB_DOSAGE_PRES_MAP[best_dosage_match]
-        ocr_name = normalize_string(ai_data.get('nom', ''))
+    # 1. Get best match for the full string
+    best_full_match, score_full = process.extractOne(ocr_full_sig, DB_SIGNATURE_MAP.keys(), scorer=fuzz.token_set_ratio)
+    print(f"[DEBUG] Score Complet: {score_full}%")
+    if score_full >= 82: # High confidence, direct match
+        return get_verified_response(DB_SIGNATURE_MAP[best_full_match], score_full)
+
+    # 2. Get best match for details (dosage/pres)
+    best_details_match, score_details = process.extractOne(ocr_details_sig, DB_DOSAGE_PRES_MAP.keys(), scorer=fuzz.token_set_ratio)
+    print(f"[DEBUG] Score Détails: {score_details}%")
+
+    # 3. Get best match for name
+    best_name_match, score_name = process.extractOne(ocr_name_sig, DB_NAMES_MAP.keys(), scorer=fuzz.token_set_ratio)
+    print(f"[DEBUG] Score Nom: {score_name}%")
+
+    # 4. Intelligent Decision Making
+    # Case A: Name and Details are both very likely correct, even if the full string score was slightly low.
+    if score_name >= 80 and score_details >= 90:
+        # We trust the name match more in this case
+        print("[DECISION] Cas A: Nom et Détails fiables.")
+        return get_verified_response(DB_NAMES_MAP[best_name_match], int((score_name + score_details) / 2), status="Auto-Corrigé")
+
+    # Case B: Details are almost perfect, but name is uncertain. The "Auto-Correct" case.
+    if score_details >= 95:
+        print("[DECISION] Cas B: Détails quasi-parfaits, recherche du meilleur nom.")
+        candidate_drugs = DB_DOSAGE_PRES_MAP[best_details_match]
         candidate_names = {normalize_string(drug.get('Nom Commercial')): drug for drug in candidate_drugs}
-        best_name_match, score_name = process.extractOne(ocr_name, candidate_names.keys())
-        print(f"[DEBUG] Score Stage 2 (Name): {score_name}%")
-        
-        if score_name >= 65:
-            verified_data_row = candidate_names[best_name_match]
-            final_score = int((score_dosage * 0.6) + (score_name * 0.4))
-            # Overwrite the AI data with the clean data from the database
-            response_data["nom"] = verified_data_row.get('Nom Commercial')
-            response_data["dosage"] = verified_data_row.get('Dosage')
-            response_data["conditionnement"] = verified_data_row.get('Présentation')
-            response_data["match_score"] = final_score
-            response_data["status"] = "Auto-Corrigé"
-            print("[CHECKPOINT F] Succès. Correspondance trouvée au Stage 2.")
-            return response_data
+        best_candidate_name, score_candidate_name = process.extractOne(ocr_name_sig, candidate_names.keys())
+        if score_candidate_name >= 60: # Lower threshold is ok here because the list is already filtered
+            final_score = int((score_details * 0.7) + (score_candidate_name * 0.3))
+            return get_verified_response(candidate_names[best_candidate_name], final_score, status="Auto-Corrigé")
 
-    # If no match was found, return the original raw AI data
-    print("[CHECKPOINT F] Aucune correspondance trouvée.")
-    response_data['match_score'] = score_full # Use the initial score
-    return response_data
+    # 5. If all else fails, return the raw AI data
+    print("[DECISION] Échec. Aucune correspondance fiable trouvée.")
+    return {"nom": ai_data.get('nom'), "dosage": ai_data.get('dosage'), "conditionnement": ai_data.get('conditionnement'), "ppa": ai_data.get('ppa'), "match_score": score_full, "status": "Non Vérifié"}
 
 # --- All API Routes (No Changes) ---
 @app.route('/api/create-session', methods=['POST'])
@@ -157,8 +141,7 @@ def upload_by_session(session_id):
         SESSIONS[session_id]['status'] = 'completed'; SESSIONS[session_id]['data'] = processed_data
         return jsonify({"status": "success"})
     except Exception as e:
-        print(f"ERREUR DANS L'ENDPOINT /api/upload-by-session: {e}")
-        traceback.print_exc()
+        print(f"ERREUR DANS L'ENDPOINT /api/upload-by-session: {e}"); traceback.print_exc()
         SESSIONS[session_id]['status'] = 'error'; SESSIONS[session_id]['data'] = str(e)
         return jsonify({"error": f"Erreur de traitement: {e}"}), 500
 @app.route('/api/check-session/<session_id>')
@@ -178,8 +161,7 @@ def process_vignette_endpoint():
     try:
         return jsonify(process_image_data(request.files['file'].read()))
     except Exception as e:
-        print(f"ERREUR DANS L'ENDPOINT /process_vignette: {e}")
-        traceback.print_exc()
+        print(f"ERREUR DANS L'ENDPOINT /process_vignette: {e}"); traceback.print_exc()
         return jsonify({"error": f"Une erreur interne est survenue: {e}"}), 500
 
 if __name__ == '__main__':
