@@ -20,7 +20,6 @@ app = Flask(__name__, template_folder='templates')
 CORS(app)
 
 # --- In-memory dictionary to store session data ---
-# This will link a session ID to an uploaded image file content
 SESSIONS = {}
 
 # --- Initialize Clients ---
@@ -50,8 +49,21 @@ except Exception as e:
 def process_image_data(image_content):
     """ Main processing logic, refactored to be reusable. """
     ocr_text = vision_client.text_detection(image=vision.Image(content=image_content)).text_annotations[0].description
-    system_prompt = "Vous êtes un expert en lecture de vignettes de médicaments françaises..."
-    chat_completion = groq_client.chat.completions.create(messages=[{"role": "system", "content": system_prompt}, {"role": "user", "content": f"Texte: {ocr_text}"}], model="llama3-8b-8192", response_format={"type": "json_object"})
+    
+    # --- THIS IS THE CORRECTED PROMPT ---
+    # It now includes the word "JSON" as required by the Groq API.
+    system_prompt = """
+    Vous êtes un expert en lecture de vignettes de médicaments françaises. Votre unique tâche est de retourner un objet JSON valide.
+    Ne retournez que l'objet JSON, sans aucun texte supplémentaire ni formatage markdown.
+
+    Voici les clés que vous devez utiliser : "nom", "dosage", "conditionnement", "ppa".
+    """
+    
+    chat_completion = groq_client.chat.completions.create(
+        messages=[{"role": "system", "content": system_prompt}, {"role": "user", "content": f"Texte de la vignette à analyser:\n---\n{ocr_text}\n---"}],
+        model="llama3-8b-8192", 
+        response_format={"type": "json_object"},
+    )
     ai_data = json.loads(chat_completion.choices[0].message.content)
     vignette_signature = normalize_string(f"{ai_data.get('nom','')} {ai_data.get('dosage','')} {ai_data.get('conditionnement','')}")
     best_match_signature, score = process.extractOne(vignette_signature, DB_SIGNATURE_MAP.keys(), scorer=fuzz.token_set_ratio)
@@ -61,11 +73,11 @@ def process_image_data(image_content):
     else:
         return {"nom": ai_data.get('nom'), "dosage": ai_data.get('dosage'), "conditionnement": ai_data.get('conditionnement'), "ppa": ai_data.get('ppa'), "match_score": score, "status": "Non Vérifié"}
 
-# --- NEW: API Routes for Phone-to-Desktop Workflow ---
+# --- API Routes for Phone-to-Desktop Workflow ---
 
 @app.route('/api/create-session', methods=['POST'])
 def create_session():
-    session_id = str(uuid.uuid4()) # Generate a unique ID
+    session_id = str(uuid.uuid4())
     SESSIONS[session_id] = {"status": "pending", "data": None, "timestamp": time.time()}
     print(f"Session created: {session_id}")
     return jsonify({"session_id": session_id})
@@ -74,42 +86,26 @@ def create_session():
 def phone_upload_page(session_id):
     if session_id not in SESSIONS:
         return "Session invalide ou expirée.", 404
-    # Serve the uploader.html page
     return render_template('uploader.html')
 
 @app.route('/api/upload-by-session/<session_id>', methods=['POST'])
 def upload_by_session(session_id):
-    # --- THIS IS THE EDITED FUNCTION WITH BETTER LOGGING ---
-    print(f"\n--- Requête d'upload reçue pour la session: {session_id} ---")
     if session_id not in SESSIONS:
-        print("ERREUR: Session ID non trouvée.")
         return jsonify({"error": "Session invalide ou expirée"}), 404
     if 'file' not in request.files:
-        print("ERREUR: 'file' non trouvé dans la requête d'upload.")
         return jsonify({"error": "Aucun fichier"}), 400
     
     file = request.files['file']
     
     try:
-        print(f"[SESSION UPLOAD] Lecture du contenu de l'image...")
         image_content = file.read()
-        print(f"[SESSION UPLOAD] Image lue, {len(image_content)} bytes. Traitement en cours...")
-        
         processed_data = process_image_data(image_content)
-        
         SESSIONS[session_id]['status'] = 'completed'
         SESSIONS[session_id]['data'] = processed_data
-        print(f"Image reçue et traitée avec succès pour la session: {session_id}")
         return jsonify({"status": "success"})
     except Exception as e:
-        # This will now print the full error to the logs
         print(f"!!!!!! ERREUR DANS L'UPLOAD PAR SESSION !!!!!!")
-        print(f"Type de l'erreur: {type(e).__name__}")
-        print(f"Message de l'erreur: {e}")
-        print("--- Traceback complet ---")
         traceback.print_exc()
-        print("--------------------------")
-        
         SESSIONS[session_id]['status'] = 'error'
         SESSIONS[session_id]['data'] = str(e)
         return jsonify({"error": "Erreur lors du traitement de l'image"}), 500
@@ -120,22 +116,18 @@ def check_session(session_id):
         return jsonify({"status": "error", "message": "Session invalide"}), 404
     
     session_info = SESSIONS[session_id]
-    # Clean up old sessions after some time
-    if time.time() - session_info.get("timestamp", 0) > 600: # 10 minutes
-        if session_id in SESSIONS:
-            del SESSIONS[session_id]
+    if time.time() - session_info.get("timestamp", 0) > 600:
+        if session_id in SESSIONS: del SESSIONS[session_id]
         return jsonify({"status": "expired"}), 410
 
     if session_info['status'] == 'completed':
-        # Return the data and clear the session
         data_to_return = session_info['data']
-        if session_id in SESSIONS:
-            del SESSIONS[session_id]
+        if session_id in SESSIONS: del SESSIONS[session_id]
         return jsonify({"status": "completed", "data": data_to_return})
     else:
         return jsonify({"status": session_info['status']})
 
-# --- Keep the direct upload endpoint for fallback ---
+# --- Direct upload endpoint for fallback ---
 @app.route('/process_vignette', methods=['POST'])
 def process_vignette_endpoint():
     if 'file' not in request.files: return jsonify({"error": "No file part"}), 400
