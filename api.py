@@ -20,7 +20,6 @@ app = Flask(__name__)
 CORS(app)
 
 # --- Initialize Clients ---
-# We add a check to ensure the API keys are present when the app starts
 try:
     print("Initialisation des clients API...")
     vision_client = vision.ImageAnnotatorClient()
@@ -65,10 +64,18 @@ def extract_text_with_google_vision(image_content):
     return response.text_annotations[0].description if response.text_annotations else ""
 
 def extract_vignette_data_with_groq(text_content):
-    system_prompt = "Vous êtes un expert en lecture de vignettes de médicaments françaises..." # Keeping short
+    # --- THIS IS THE CORRECTED PROMPT ---
+    system_prompt = """
+    Vous êtes un expert en lecture de vignettes de médicaments françaises. Votre unique tâche est de retourner un objet JSON valide.
+    Ne retournez que l'objet JSON, sans aucun texte supplémentaire ni formatage markdown.
+
+    Voici les clés que vous devez utiliser : "nom", "dosage", "conditionnement", "ppa".
+    """
+    
     chat_completion = groq_client.chat.completions.create(
-        messages=[{"role": "system", "content": system_prompt}, {"role": "user", "content": f"Texte: {text_content}"}],
-        model="llama3-8b-8192", response_format={"type": "json_object"},
+        messages=[{"role": "system", "content": system_prompt}, {"role": "user", "content": f"Texte de la vignette à analyser:\n---\n{text_content}\n---"}],
+        model="llama3-8b-8192", 
+        response_format={"type": "json_object"},
     )
     return json.loads(chat_completion.choices[0].message.content)
 
