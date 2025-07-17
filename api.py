@@ -9,126 +9,121 @@ from google.cloud import vision
 from groq import Groq
 from thefuzz import process, fuzz
 
-# --- Flask & Clients ---
+# --- Initialisation de l'application et des clients ---
 app = Flask(__name__)
 CORS(app)
+
 vision_client = vision.ImageAnnotatorClient()
 groq_client = Groq(api_key=os.environ.get("GROQ_API_KEY"))
 
-# --- Load Medication Database ---
-chifa_df = pd.read_excel("chifa_data.xlsx")
-
+# --- Fonctions de normalisation et de signature ---
 def normalize_string(s):
-    if not isinstance(s, str):
-        return ""
-    s = s.lower().replace('bte', 'b').replace('boite', 'b')
-    s = s.replace('comprimés', 'cp').replace('comprimé', 'cp')
-    s = s.replace('grammes', 'g').replace('gramme', 'g').replace('milligrammes', 'mg')
-    s = re.sub(r'(\d)[ ]+([a-z%]+)', r'\1\2', s)
+    if not isinstance(s, str): return ""
+    s = s.lower()
+    s = s.replace('bte', 'b').replace('boite', 'b').replace('boîte', 'b').replace('bt', 'b')
+    s = s.replace('comprimés pelliculés', 'cp').replace('comprimés', 'cp').replace('comprimé', 'cp')
+    s = s.replace('grammes', 'g').replace('gramme', 'g')
+    s = s.replace('milligrammes', 'mg').replace('milligramme', 'mg')
+    s = s.replace('mg.', 'mg')
+    s = re.sub(r'\bde\b', '', s)
     s = re.sub(r'[^a-z0-9]', ' ', s)
     return re.sub(r'\s+', ' ', s).strip()
 
 def build_reference_string(row):
-    return f"{row['Nom Commercial']} {row['Dosage']} {row['Présentation']}"
+    nom = row.get('Nom Commercial', '')
+    dosage = row.get('Dosage', '')
+    presentation = row.get('Présentation', '')
+    return f"{nom} {dosage} {presentation}"
 
-def match_vignette_to_database(nom, dosage, conditionnement, db_df, threshold=85):
-    input_string = f"{nom} {dosage} {conditionnement}"
-    input_norm = normalize_string(input_string)
+# --- Chargement et préparation de la base de données au démarrage ---
+DB_SIGNATURE_MAP = {}
+try:
+    print("Chargement de la base de données de médicaments au démarrage...")
+    df = pd.read_excel("chifa_data.xlsx") 
+    df['reference_combined'] = df.apply(build_reference_string, axis=1)
+    for index, row in df.iterrows():
+        normalized_signature = normalize_string(row['reference_combined'])
+        DB_SIGNATURE_MAP[normalized_signature] = row.to_dict()
+    print(f"Base de données chargée et préparée avec {len(DB_SIGNATURE_MAP)} médicaments.")
+except Exception as e:
+    print(f"ERREUR critique lors du chargement de la base de données : {e}")
 
-    db_df['ref'] = db_df.apply(build_reference_string, axis=1)
-    db_df['ref_norm'] = db_df['ref'].apply(normalize_string)
-
-    best_match, score = process.extractOne(input_norm, db_df['ref_norm'].tolist(), scorer=fuzz.token_set_ratio)
-
-    if best_match and score >= threshold:
-        matched_row = db_df[db_df['ref_norm'] == best_match].iloc[0]
-        return {
-            "nom": matched_row['Nom Commercial'],
-            "dosage": matched_row['Dosage'],
-            "conditionnement": matched_row['Présentation'],
-            "score": score
-        }
-    else:
-        return {
-            "nom": nom,
-            "dosage": dosage,
-            "conditionnement": conditionnement,
-            "score": score
-        }
-
-# --- OCR ---
+# --- Fonctions de l'API ---
 def extract_text_with_google_vision(image_content):
     image = vision.Image(content=image_content)
     response = vision_client.text_detection(image=image)
-    if response.error.message:
-        raise Exception(response.error.message)
+    if response.error.message: raise Exception(response.error.message)
     return response.text_annotations[0].description if response.text_annotations else ""
 
-# --- Groq Extraction ---
 def extract_vignette_data_with_groq(text_content):
     chat_completion = groq_client.chat.completions.create(
         messages=[
-            {
-                "role": "system",
-                "content": """
-                You are an expert at reading French medication vignettes (the small price stickers). From the user's text, extract the information into a valid JSON object and nothing else.
-
-                The JSON object must have these exact keys:
-                - \"nom\": The commercial name ONLY (no dosage)
-                - \"dosage\": e.g., \"200 mg\"
-                - \"conditionnement\": format \"B/XX\"
-                - \"ppa\": numeric value or empty string
-                """
-            },
-            {
-                "role": "user",
-                "content": f"Here is the vignette text:\n\n---\n{text_content}\n---",
-            }
+            {"role": "system", "content": """
+            Vous êtes un expert en lecture de vignettes de médicaments françaises. Extrayez les informations dans un objet JSON valide avec les clés 'nom', 'dosage', 'conditionnement', et 'ppa'. Ne retournez que l'objet JSON.
+            """},
+            {"role": "user", "content": f"Texte de la vignette:\n---\n{text_content}\n---"}
         ],
         model="llama3-8b-8192",
         response_format={"type": "json_object"},
     )
-    return chat_completion.choices[0].message.content
+    return json.loads(chat_completion.choices[0].message.content)
 
-# --- API Endpoints ---
+# --- Route de l'API ---
 @app.route('/process_vignette', methods=['POST'])
 def process_vignette_endpoint():
-    if 'file' not in request.files:
-        return jsonify({"error": "No file part"}), 400
+    if 'file' not in request.files: return jsonify({"error": "No file part"}), 400
     file = request.files['file']
-    if file.filename == '':
-        return jsonify({"error": "No selected file"}), 400
+    if file.filename == '': return jsonify({"error": "No selected file"}), 400
+
     try:
         image_content = file.read()
         ocr_text = extract_text_with_google_vision(image_content)
-        structured_data_json_string = extract_vignette_data_with_groq(ocr_text)
-        structured_data = json.loads(structured_data_json_string)
+        ai_data = extract_vignette_data_with_groq(ocr_text)
 
-        # Fuzzy match with DB
-        verified = match_vignette_to_database(
-            structured_data.get("nom", ""),
-            structured_data.get("dosage", ""),
-            structured_data.get("conditionnement", ""),
-            chifa_df
+        vignette_signature = normalize_string(f"{ai_data.get('nom','')} {ai_data.get('dosage','')} {ai_data.get('conditionnement','')}")
+
+        print("\n===== DEBUG INFO =====")
+        print("OCR Text:", ocr_text)
+        print("AI Data:", ai_data)
+        print("Normalized Signature:", vignette_signature)
+        print("Sample DB keys:", list(DB_SIGNATURE_MAP.keys())[:5])
+        print("=======================\n")
+
+        best_match_signature, score = process.extractOne(
+            vignette_signature,
+            DB_SIGNATURE_MAP.keys(),
+            scorer=fuzz.token_set_ratio
         )
 
-        # Update response with verified data
-        structured_data["nom"] = verified["nom"]
-        structured_data["dosage"] = verified["dosage"]
-        structured_data["conditionnement"] = verified["conditionnement"]
-        structured_data["match_score"] = verified["score"]
+        if score >= 85:
+            verified_data = DB_SIGNATURE_MAP[best_match_signature]
+            response_data = {
+                "nom": verified_data.get('Nom Commercial'),
+                "dosage": verified_data.get('Dosage'),
+                "conditionnement": verified_data.get('Présentation'),
+                "ppa": ai_data.get('ppa'),
+                "match_score": score,
+                "status": "Vérifié"
+            }
+        else:
+            response_data = {
+                "nom": ai_data.get('nom'),
+                "dosage": ai_data.get('dosage'),
+                "conditionnement": ai_data.get('conditionnement'),
+                "ppa": ai_data.get('ppa'),
+                "match_score": score,
+                "status": "Non Vérifié"
+            }
 
-        return jsonify(structured_data)
+        return jsonify(response_data)
 
     except Exception as e:
-        print("!!! SERVER ERROR !!!")
-        print(traceback.format_exc())
-        return jsonify({"error": f"An internal server error occurred: {e}"}), 500
+        print(f"!!! ERREUR SERVEUR !!!\n{traceback.format_exc()}")
+        return jsonify({"error": f"Une erreur interne est survenue: {e}"}), 500
 
-# --- Placeholder ---
 @app.route('/process_prescription', methods=['POST'])
 def process_prescription_endpoint():
-    return jsonify({"message": "Prescription endpoint not implemented."})
+    return jsonify({"message": "Endpoint pour les ordonnances non implémenté."})
 
 if __name__ == '__main__':
     app.run(debug=True)
