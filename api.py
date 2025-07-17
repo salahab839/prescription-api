@@ -74,8 +74,8 @@ def extract_vignette_data_with_groq(text_content):
     - "ppa": Le prix (un nombre ou une chaîne vide).
 
     Exemple 1 :
-    Texte en entrée : "FUCARE 250 mg Boite de 10 comprimés pelliculés"
-    Votre sortie : {"nom": "FUCARE", "dosage": "250 mg", "conditionnement": "Boite de 10 comprimés pelliculés", "ppa": ""}
+    Texte en entrée : "FUCARE 250 mg Boite de 10 comprimés pelliculés PPA: 913.60"
+    Votre sortie : {"nom": "FUCARE", "dosage": "250 mg", "conditionnement": "Boite de 10 comprimés pelliculés", "ppa": "913.60"}
 
     Exemple 2 :
     Texte en entrée : "DOLIPRANE 1000 MG B/8 COMP"
@@ -120,7 +120,8 @@ def process_vignette_endpoint():
         
         print(f"Meilleure correspondance trouvée dans la DB : '{best_match_signature}' avec un score de {score}%")
 
-        if score >= 85:
+        # --- SEUIL DE CONFIANCE AJUSTÉ ---
+        if score >= 75:
             # Si une bonne correspondance est trouvée, retourne les données vérifiées de la DB
             verified_data = DB_SIGNATURE_MAP[best_match_signature]
             response_data = {
