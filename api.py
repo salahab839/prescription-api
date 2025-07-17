@@ -44,16 +44,21 @@ try:
     df = pd.read_excel(DB_PATH) 
     for index, row in df.iterrows():
         row_dict = row.to_dict()
+        # Full signature for direct matching
         full_signature = normalize_string(build_reference_string(row))
         DB_SIGNATURE_MAP[full_signature] = row_dict
         
+        # Details-only signature for fallback
         dosage_pres_signature = normalize_string(build_reference_string(row, include_name=False))
         if dosage_pres_signature not in DB_DOSAGE_PRES_MAP:
             DB_DOSAGE_PRES_MAP[dosage_pres_signature] = []
         DB_DOSAGE_PRES_MAP[dosage_pres_signature].append(row_dict)
         
+        # Name-only signature for the new powerful fallback
         name_signature = normalize_string(build_reference_string(row, include_details=False))
-        DB_NAMES_MAP[name_signature] = row_dict
+        if name_signature not in DB_NAMES_MAP:
+            DB_NAMES_MAP[name_signature] = []
+        DB_NAMES_MAP[name_signature].append(row_dict)
 
     print(f"Base de données chargée avec {len(DB_SIGNATURE_MAP)} médicaments.")
 except Exception as e:
@@ -90,38 +95,41 @@ def process_image_data(image_content):
     ocr_name_sig = normalize_string(ai_data.get('nom',''))
     ocr_details_sig = normalize_string(f"{ai_data.get('dosage','')} {ai_data.get('conditionnement','')}")
 
-    # 1. Get best match for the full string
+    # --- Path 1: High-Confidence Full Match ---
     best_full_match, score_full = process.extractOne(ocr_full_sig, DB_SIGNATURE_MAP.keys(), scorer=fuzz.token_set_ratio)
     print(f"[DEBUG] Score Complet: {score_full}%")
-    if score_full >= 82: # High confidence, direct match
+    if score_full >= 85:
+        print("[DECISION] Succès via Chemin 1 (Correspondance Complète).")
         return get_verified_response(DB_SIGNATURE_MAP[best_full_match], score_full)
 
-    # 2. Get best match for details (dosage/pres)
-    best_details_match, score_details = process.extractOne(ocr_details_sig, DB_DOSAGE_PRES_MAP.keys(), scorer=fuzz.token_set_ratio)
-    print(f"[DEBUG] Score Détails: {score_details}%")
-
-    # 3. Get best match for name
+    # --- Path 2: High-Confidence Name Match -> Deduce Details ---
     best_name_match, score_name = process.extractOne(ocr_name_sig, DB_NAMES_MAP.keys(), scorer=fuzz.token_set_ratio)
     print(f"[DEBUG] Score Nom: {score_name}%")
+    if score_name >= 90:
+        print("[DECISION] Analyse via Chemin 2 (Nom Fiable).")
+        candidate_drugs = DB_NAMES_MAP[best_name_match]
+        # From this small pool of drugs with the same name, find the one with the best details
+        candidate_details = {normalize_string(build_reference_string(drug, include_name=False)): drug for drug in candidate_drugs}
+        best_candidate_details, score_candidate_details = process.extractOne(ocr_details_sig, candidate_details.keys())
+        if score_candidate_details >= 70: # Confidence for details within the filtered list
+            final_score = int((score_name * 0.6) + (score_candidate_details * 0.4))
+            print(f"[DECISION] Succès via Chemin 2. Score final: {final_score}%")
+            return get_verified_response(candidate_details[best_candidate_details], final_score, status="Auto-Corrigé")
 
-    # 4. Intelligent Decision Making
-    # Case A: Name and Details are both very likely correct, even if the full string score was slightly low.
-    if score_name >= 80 and score_details >= 90:
-        # We trust the name match more in this case
-        print("[DECISION] Cas A: Nom et Détails fiables.")
-        return get_verified_response(DB_NAMES_MAP[best_name_match], int((score_name + score_details) / 2), status="Auto-Corrigé")
-
-    # Case B: Details are almost perfect, but name is uncertain. The "Auto-Correct" case.
+    # --- Path 3: High-Confidence Details Match -> Deduce Name ---
+    best_details_match, score_details = process.extractOne(ocr_details_sig, DB_DOSAGE_PRES_MAP.keys(), scorer=fuzz.token_set_ratio)
+    print(f"[DEBUG] Score Détails: {score_details}%")
     if score_details >= 95:
-        print("[DECISION] Cas B: Détails quasi-parfaits, recherche du meilleur nom.")
+        print("[DECISION] Analyse via Chemin 3 (Détails Fiables).")
         candidate_drugs = DB_DOSAGE_PRES_MAP[best_details_match]
-        candidate_names = {normalize_string(drug.get('Nom Commercial')): drug for drug in candidate_drugs}
+        candidate_names = {normalize_string(build_reference_string(drug, include_details=False)): drug for drug in candidate_drugs}
         best_candidate_name, score_candidate_name = process.extractOne(ocr_name_sig, candidate_names.keys())
-        if score_candidate_name >= 60: # Lower threshold is ok here because the list is already filtered
+        if score_candidate_name >= 60:
             final_score = int((score_details * 0.7) + (score_candidate_name * 0.3))
+            print(f"[DECISION] Succès via Chemin 3. Score final: {final_score}%")
             return get_verified_response(candidate_names[best_candidate_name], final_score, status="Auto-Corrigé")
 
-    # 5. If all else fails, return the raw AI data
+    # --- Path 4: All Intelligent Paths Failed ---
     print("[DECISION] Échec. Aucune correspondance fiable trouvée.")
     return {"nom": ai_data.get('nom'), "dosage": ai_data.get('dosage'), "conditionnement": ai_data.get('conditionnement'), "ppa": ai_data.get('ppa'), "match_score": score_full, "status": "Non Vérifié"}
 
