@@ -108,10 +108,23 @@ def process_image_data(image_content):
     if score_name >= 90:
         print("[DECISION] Analyse via Chemin 2 (Nom Fiable).")
         candidate_drugs = DB_NAMES_MAP[best_name_match]
-        # From this small pool of drugs with the same name, find the one with the best details
+        
+        # If there's only one variant for that name, it MUST be the correct one.
+        if len(candidate_drugs) == 1:
+            print("[DECISION] Succès via Chemin 2 (Variante unique).")
+            # We don't need to check the details score, we just use this one.
+            # But we can calculate it for user feedback.
+            candidate_details_sig = normalize_string(build_reference_string(candidate_drugs[0], include_name=False))
+            score_candidate_details = fuzz.token_set_ratio(ocr_details_sig, candidate_details_sig)
+            final_score = int((score_name * 0.7) + (score_candidate_details * 0.3))
+            return get_verified_response(candidate_drugs[0], final_score, status="Auto-Corrigé")
+
+        # If there are multiple variants, we need to find the best one.
         candidate_details = {normalize_string(build_reference_string(drug, include_name=False)): drug for drug in candidate_drugs}
-        best_candidate_details, score_candidate_details = process.extractOne(ocr_details_sig, candidate_details.keys())
-        if score_candidate_details >= 70: # Confidence for details within the filtered list
+        # Use a more robust scorer for this critical step
+        best_candidate_details, score_candidate_details = process.extractOne(ocr_details_sig, candidate_details.keys(), scorer=fuzz.WRatio)
+        
+        if score_candidate_details >= 75: # Higher confidence for details within the filtered list
             final_score = int((score_name * 0.6) + (score_candidate_details * 0.4))
             print(f"[DECISION] Succès via Chemin 2. Score final: {final_score}%")
             return get_verified_response(candidate_details[best_candidate_details], final_score, status="Auto-Corrigé")
