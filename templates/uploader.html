@@ -55,8 +55,20 @@
             uploadImage(file);
         });
 
-        finishBtn.addEventListener('click', () => {
-            window.location.href = 'about:blank'; // Close the page
+        finishBtn.addEventListener('click', async () => {
+            setLoading(true);
+            try {
+                await fetch(`/api/finish-session/${sessionId}`, { method: 'POST' });
+                statusDiv.textContent = 'Session terminée. Vous pouvez fermer cette page.';
+                statusDiv.style.color = 'green';
+                uploadLabel.style.display = 'none';
+                finishBtn.style.display = 'none';
+            } catch (error) {
+                statusDiv.textContent = 'Erreur lors de la finalisation.';
+                statusDiv.style.color = 'red';
+            } finally {
+                setLoading(false);
+            }
         });
 
         async function uploadImage(file) {
@@ -86,22 +98,16 @@
                 statusDiv.textContent = `❌ Erreur: ${error.message}`;
                 statusDiv.style.color = 'red';
             } finally {
-                // Reset file input to allow capturing the same file again if needed
                 fileInput.value = '';
                 setLoading(false);
             }
         }
 
         function setLoading(isLoading) {
-            if (isLoading) {
-                spinner.style.display = 'block';
-                uploadLabel.style.pointerEvents = 'none';
-                uploadLabel.style.backgroundColor = '#a0c7ff';
-            } else {
-                spinner.style.display = 'none';
-                uploadLabel.style.pointerEvents = 'auto';
-                uploadLabel.style.backgroundColor = '#007bff';
-            }
+            spinner.style.display = isLoading ? 'block' : 'none';
+            uploadLabel.style.pointerEvents = isLoading ? 'none' : 'auto';
+            uploadLabel.style.backgroundColor = isLoading ? '#a0c7ff' : '#007bff';
+            finishBtn.disabled = isLoading;
         }
     </script>
 </body>
