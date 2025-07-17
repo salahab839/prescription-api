@@ -67,10 +67,9 @@ def process_image_data(image_content):
     { "nom": "DOLIPRANE", "dosage": "1000 MG", "conditionnement": "BTE/8", "ppa": "195.00" }
     Utilisez les clés suivantes : "nom", "dosage", "conditionnement", "ppa".
     """
-    # --- THIS IS THE CORRECTED API CALL ---
     chat_completion = groq_client.chat.completions.create(
         messages=[{"role": "system", "content": system_prompt}, {"role": "user", "content": f"Texte à analyser:\n---\n{ocr_text}\n---"}],
-        model="llama3-8b-8192",  # The missing 'model' argument is now here
+        model="llama3-8b-8192",
         response_format={"type": "json_object"}
     )
     ai_data = json.loads(chat_completion.choices[0].message.content)
@@ -111,7 +110,7 @@ def process_image_data(image_content):
 @app.route('/api/create-session', methods=['POST'])
 def create_session():
     session_id = str(uuid.uuid4())
-    SESSIONS[session_id] = {"medications": [], "timestamp": time.time()}
+    SESSIONS[session_id] = {"status": "pending", "medications": [], "timestamp": time.time()}
     print(f"Session créée: {session_id}")
     return jsonify({"session_id": session_id})
 
@@ -121,7 +120,8 @@ def phone_upload_page(session_id):
 
 @app.route('/api/upload-by-session/<session_id>', methods=['POST'])
 def upload_by_session(session_id):
-    if session_id not in SESSIONS: return jsonify({"error": "Session invalide"}), 404
+    if session_id not in SESSIONS or SESSIONS[session_id]['status'] != 'pending':
+        return jsonify({"error": "Session invalide ou terminée"}), 404
     if 'file' not in request.files: return jsonify({"error": "Aucun fichier"}), 400
     try:
         processed_data = process_image_data(request.files['file'].read())
@@ -131,6 +131,24 @@ def upload_by_session(session_id):
     except Exception as e:
         print(f"ERREUR DANS L'ENDPOINT /api/upload-by-session: {e}"); traceback.print_exc()
         return jsonify({"error": f"Erreur de traitement: {e}"}), 500
+
+@app.route('/api/finish-session/<session_id>', methods=['POST'])
+def finish_session(session_id):
+    if session_id in SESSIONS:
+        SESSIONS[session_id]['status'] = 'finished'
+        print(f"Session marquée comme terminée: {session_id}")
+        return jsonify({"status": "success"})
+    return jsonify({"error": "Session invalide"}), 404
+
+@app.route('/api/check-session/<session_id>')
+def check_session(session_id):
+    if session_id not in SESSIONS:
+        return jsonify({"status": "invalid"}), 404
+    session_info = SESSIONS[session_id]
+    if time.time() - session_info.get("timestamp", 0) > 600: # 10 minute timeout
+        if session_id in SESSIONS: del SESSIONS[session_id]
+        return jsonify({"status": "expired"}), 410
+    return jsonify({"status": session_info['status']})
 
 @app.route('/api/get-session-data/<session_id>')
 def get_session_data(session_id):
