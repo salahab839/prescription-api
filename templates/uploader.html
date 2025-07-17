@@ -3,29 +3,37 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Scanner Vignette</title>
+    <title>Scanner de Session</title>
     <style>
         body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; display: flex; justify-content: center; align-items: center; height: 100vh; margin: 0; background-color: #f0f2f5; }
-        .container { text-align: center; padding: 20px; background-color: white; border-radius: 12px; box-shadow: 0 4px 12px rgba(0,0,0,0.1); }
+        .container { text-align: center; padding: 20px; background-color: white; border-radius: 12px; box-shadow: 0 4px 12px rgba(0,0,0,0.1); width: 90%; max-width: 400px; }
         h1 { color: #333; }
-        p { color: #666; }
-        .upload-btn { display: inline-block; padding: 15px 30px; background-color: #007bff; color: white; font-size: 18px; font-weight: bold; border-radius: 8px; cursor: pointer; transition: background-color 0.2s; }
+        p { color: #666; font-size: 1.1rem; }
+        .upload-btn { display: inline-block; padding: 15px 30px; margin-top: 15px; background-color: #007bff; color: white; font-size: 18px; font-weight: bold; border-radius: 8px; cursor: pointer; transition: background-color 0.2s; width: 80%; }
+        .finish-btn { background-color: #28a745; margin-top: 10px; }
         .upload-btn:hover { background-color: #0056b3; }
+        .finish-btn:hover { background-color: #218838; }
         #file-input { display: none; }
-        #status { margin-top: 20px; font-weight: bold; }
+        #status { margin-top: 20px; font-weight: bold; min-height: 24px; }
+        #counter { font-size: 1.5rem; font-weight: bold; color: #007bff; margin-top: 10px; }
         .spinner { border: 4px solid #f3f3f3; border-top: 4px solid #007bff; border-radius: 50%; width: 30px; height: 30px; animation: spin 1s linear infinite; margin: 20px auto; display: none; }
         @keyframes spin { 0% { transform: rotate(0deg); } 100% { transform: rotate(360deg); } }
     </style>
 </head>
 <body>
     <div class="container">
-        <h1>Scanner la Vignette</h1>
-        <p>L'image sera envoyée à votre application de bureau.</p>
-        <label for="file-input" class="upload-btn">
-            📷 Prendre une photo
+        <h1>Session de Scan</h1>
+        <p>Prenez en photo chaque vignette de l'ordonnance.</p>
+        
+        <div id="counter">0 médicament(s) ajouté(s)</div>
+
+        <label for="file-input" class="upload-btn" id="upload-label">
+            📷 Ajouter une vignette
         </label>
-        <!-- This input opens the camera directly on mobile -->
         <input id="file-input" type="file" accept="image/*" capture="environment">
+
+        <button class="upload-btn finish-btn" id="finish-btn">Terminer la session</button>
+
         <div class="spinner" id="spinner"></div>
         <div id="status"></div>
     </div>
@@ -34,28 +42,31 @@
         const fileInput = document.getElementById('file-input');
         const statusDiv = document.getElementById('status');
         const spinner = document.getElementById('spinner');
-
-        // This gets the unique session ID from the URL
+        const uploadLabel = document.getElementById('upload-label');
+        const finishBtn = document.getElementById('finish-btn');
+        const counterDiv = document.getElementById('counter');
+        
+        let medicationCount = 0;
         const sessionId = window.location.pathname.split('/').pop();
 
         fileInput.addEventListener('change', (event) => {
             const file = event.target.files[0];
-            if (!file) {
-                return;
-            }
+            if (!file) return;
             uploadImage(file);
         });
 
-        async function uploadImage(file) {
-            statusDiv.textContent = 'Envoi de l\'image...';
-            statusDiv.style.color = 'blue';
-            spinner.style.display = 'block';
+        finishBtn.addEventListener('click', () => {
+            window.location.href = 'about:blank'; // Close the page
+        });
 
+        async function uploadImage(file) {
+            setLoading(true);
+            statusDiv.textContent = 'Analyse de l\'image...';
+            
             const formData = new FormData();
             formData.append('file', file);
 
             try {
-                // The API endpoint includes the session ID
                 const response = await fetch(`/api/upload-by-session/${sessionId}`, {
                     method: 'POST',
                     body: formData,
@@ -66,15 +77,30 @@
                     throw new Error(errorResult.error || 'Erreur du serveur');
                 }
 
-                const result = await response.json();
-                statusDiv.textContent = '✅ Succès ! Vous pouvez fermer cette page.';
+                medicationCount++;
+                counterDiv.textContent = `${medicationCount} médicament(s) ajouté(s)`;
+                statusDiv.textContent = '✅ Succès ! Prêt pour le suivant.';
                 statusDiv.style.color = 'green';
 
             } catch (error) {
                 statusDiv.textContent = `❌ Erreur: ${error.message}`;
                 statusDiv.style.color = 'red';
             } finally {
+                // Reset file input to allow capturing the same file again if needed
+                fileInput.value = '';
+                setLoading(false);
+            }
+        }
+
+        function setLoading(isLoading) {
+            if (isLoading) {
+                spinner.style.display = 'block';
+                uploadLabel.style.pointerEvents = 'none';
+                uploadLabel.style.backgroundColor = '#a0c7ff';
+            } else {
                 spinner.style.display = 'none';
+                uploadLabel.style.pointerEvents = 'auto';
+                uploadLabel.style.backgroundColor = '#007bff';
             }
         }
     </script>
