@@ -60,8 +60,21 @@ except Exception as e:
 def process_image_data(image_content):
     """ Main processing logic with NEW Two-Stage Verification. """
     ocr_text = vision_client.text_detection(image=vision.Image(content=image_content)).text_annotations[0].description
-    system_prompt = "Vous êtes un expert en lecture de vignettes de médicaments françaises..."
-    chat_completion = groq_client.chat.completions.create(messages=[{"role": "system", "content": system_prompt}, {"role": "user", "content": f"Texte: {ocr_text}"}], model="llama3-8b-8192", response_format={"type": "json_object"})
+    
+    # --- THIS IS THE CORRECTED PROMPT ---
+    # It is now more explicit and includes the required "JSON" keyword for the API.
+    system_prompt = """
+    Vous êtes un expert en lecture de vignettes de médicaments françaises. Votre unique tâche est de retourner un objet JSON valide.
+    Ne retournez que l'objet JSON, sans aucun texte supplémentaire ni formatage markdown.
+
+    Voici les clés que vous devez utiliser : "nom", "dosage", "conditionnement", "ppa".
+    """
+    
+    chat_completion = groq_client.chat.completions.create(
+        messages=[{"role": "system", "content": system_prompt}, {"role": "user", "content": f"Texte de la vignette à analyser:\n---\n{ocr_text}\n---"}],
+        model="llama3-8b-8192", 
+        response_format={"type": "json_object"}
+    )
     ai_data = json.loads(chat_completion.choices[0].message.content)
 
     # --- Stage 1: Attempt a full match ---
@@ -77,29 +90,20 @@ def process_image_data(image_content):
 
     # --- Stage 2: Fallback to smart search if Stage 1 fails ---
     print("--- Stage 2: Fallback to Smart Search ---")
-    # Create signature from only the reliable parts
     dosage_pres_sig = normalize_string(f"{ai_data.get('dosage','')} {ai_data.get('conditionnement','')}")
-    
-    # Find all DB entries with similar dosage/presentation
     best_dosage_match, score_dosage = process.extractOne(dosage_pres_sig, DB_DOSAGE_PRES_MAP.keys())
     
     if score_dosage >= 95: # Very high confidence on dosage/presentation
         print(f"Found candidate pool with dosage/presentation match: '{best_dosage_match}'")
         candidate_drugs = DB_DOSAGE_PRES_MAP[best_dosage_match]
-        
-        # From this small pool, find the one with the closest name
         ocr_name = normalize_string(ai_data.get('nom', ''))
-        
-        # Create a dictionary of {normalized_name: drug_data} for the candidates
         candidate_names = {normalize_string(drug.get('Nom Commercial')): drug for drug in candidate_drugs}
-        
         best_name_match, score_name = process.extractOne(ocr_name, candidate_names.keys())
         
         print(f"Best name match in candidate pool: '{best_name_match}' with score {score_name}%")
         if score_name >= 70: # Confidence threshold for the name within the filtered list
             print("Success: High confidence match found in Stage 2.")
             verified_data = candidate_names[best_name_match]
-            # Use the combined score for user feedback
             final_score = int((score_dosage * 0.6) + (score_name * 0.4)) # Weighted average
             return {"nom": verified_data.get('Nom Commercial'), "dosage": verified_data.get('Dosage'), "conditionnement": verified_data.get('Présentation'), "ppa": ai_data.get('ppa'), "match_score": final_score, "status": "Vérifié (Auto-Corrigé)"}
 
@@ -108,7 +112,6 @@ def process_image_data(image_content):
     return {"nom": ai_data.get('nom'), "dosage": ai_data.get('dosage'), "conditionnement": ai_data.get('conditionnement'), "ppa": ai_data.get('ppa'), "match_score": score_full, "status": "Non Vérifié"}
 
 # --- All API Routes (No Changes) ---
-# They will automatically use the new `process_image_data` function.
 @app.route('/api/create-session', methods=['POST'])
 def create_session():
     session_id = str(uuid.uuid4()); SESSIONS[session_id] = {"status": "pending", "data": None, "timestamp": time.time()}; return jsonify({"session_id": session_id})
