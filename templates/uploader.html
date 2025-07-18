@@ -11,9 +11,9 @@
             --viewfinder-locked: #39ff14; /* Vert vif */
         }
         body { margin: 0; background-color: #000; color: white; font-family: sans-serif; overflow: hidden; }
-        #camera-container { position: fixed; top: 0; left: 0; width: 100%; height: 100%; }
+        #camera-container { position: fixed; top: 0; left: 0; width: 100%; height: 100%; visibility: hidden; }
         #video { width: 100%; height: 100%; object-fit: cover; }
-        #overlay { position: fixed; top: 0; left: 0; width: 100%; height: 100%; display: flex; flex-direction: column; justify-content: space-between; }
+        #overlay { position: fixed; top: 0; left: 0; width: 100%; height: 100%; display: flex; flex-direction: column; justify-content: space-between; visibility: hidden; }
         .top-bar, .bottom-bar { background: rgba(0,0,0,0.6); padding: 15px; text-align: center; backdrop-filter: blur(5px); }
         h1 { margin: 0; font-size: 1.2rem; }
         #status { font-weight: bold; min-height: 20px; transition: color 0.3s; }
@@ -35,9 +35,27 @@
             transition: width 0.5s linear;
         }
         #finish-button { padding: 10px 20px; background-color: var(--success-color); border: none; border-radius: 8px; font-size: 1rem; color: white; cursor: pointer; }
+        
+        /* Start Screen Styles */
+        #start-screen {
+            position: fixed; top: 0; left: 0; width: 100%; height: 100%;
+            background-color: #222;
+            display: flex; justify-content: center; align-items: center;
+            z-index: 10;
+        }
+        #start-button {
+            padding: 20px 40px; font-size: 1.5rem; color: white;
+            background-color: #007bff; border: none; border-radius: 12px;
+            cursor: pointer;
+        }
     </style>
 </head>
 <body>
+    <!-- NOUVEAU : Écran de démarrage pour initialiser l'audio -->
+    <div id="start-screen">
+        <button id="start-button">Démarrer le Scan</button>
+    </div>
+
     <div id="camera-container">
         <video id="video" playsinline autoplay muted></video>
         <canvas id="canvas" style="display:none;"></canvas>
@@ -59,6 +77,10 @@
     </div>
 
     <script>
+        const startScreen = document.getElementById('start-screen');
+        const startButton = document.getElementById('start-button');
+        const cameraContainer = document.getElementById('camera-container');
+        const overlay = document.getElementById('overlay');
         const video = document.getElementById('video');
         const canvas = document.getElementById('canvas');
         const ctx = canvas.getContext('2d', { willReadFrequently: true });
@@ -73,7 +95,20 @@
         let medicationCount = 0;
         let isProcessing = false;
         let detectionStartTime = null;
-        const DETECTION_DELAY = 500; // 0.5 seconde de détection stable requise
+        const DETECTION_DELAY = 500; // 0.5 seconde
+
+        // NOUVEAU : Logique de l'écran de démarrage
+        startButton.addEventListener('click', () => {
+            // "Débloque" l'audio pour le navigateur
+            beep.play();
+            beep.pause();
+            beep.currentTime = 0;
+
+            startScreen.style.display = 'none';
+            cameraContainer.style.visibility = 'visible';
+            overlay.style.visibility = 'visible';
+            startCamera();
+        });
 
         async function startCamera() {
             try {
@@ -111,7 +146,7 @@
 
             const greenRatio = greenPixels / (data.length / 4);
 
-            if (greenRatio > 0.05) { // Seuil de détection du vert
+            if (greenRatio > 0.05) {
                 if (detectionStartTime === null) {
                     detectionStartTime = Date.now();
                 }
@@ -136,7 +171,7 @@
         function autoCapture() {
             if (isProcessing) return;
             isProcessing = true;
-            beep.play();
+            beep.play(); // Le son est joué ici
             
             const snapCanvas = document.createElement('canvas');
             snapCanvas.width = video.videoWidth;
@@ -158,7 +193,7 @@
                 } catch (e) {
                     statusDiv.textContent = '❌ Erreur d\'envoi';
                 } finally {
-                    setTimeout(() => { isProcessing = false; detectionStartTime = null; }, 2000); // Cooldown de 2s
+                    setTimeout(() => { isProcessing = false; detectionStartTime = null; }, 2000);
                 }
             }, 'image/jpeg', 0.9);
         }
@@ -170,14 +205,15 @@
                 await fetch(`/api/finish-session/${sessionId}`, { method: 'POST' });
                 statusDiv.textContent = 'Session terminée ✅';
                 statusDiv.style.color = '#28a745';
-                video.srcObject.getTracks().forEach(track => track.stop()); // Arrête la caméra
+                if (video.srcObject) {
+                    video.srcObject.getTracks().forEach(track => track.stop());
+                }
             } catch (err) {
                 statusDiv.textContent = 'Erreur lors de la finalisation';
                 finishButton.disabled = false;
             }
         });
 
-        startCamera();
     </script>
 </body>
 </html>
