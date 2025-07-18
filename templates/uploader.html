@@ -9,26 +9,30 @@
             --primary-color: #007bff;
             --success-color: #28a745;
             --danger-color: #dc3545;
+            --viewfinder-default: rgba(255, 255, 255, 0.7);
+            --viewfinder-locked: #39ff14; /* Vert vif pour la détection */
         }
         body { margin: 0; background-color: #111; color: white; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; overflow: hidden; }
         #camera-container { position: fixed; top: 0; left: 0; width: 100%; height: 100%; }
         #video { width: 100%; height: 100%; object-fit: cover; }
         #overlay { position: fixed; top: 0; left: 0; width: 100%; height: 100%; display: flex; flex-direction: column; justify-content: space-between; }
-        .top-bar, .bottom-bar { background: rgba(0,0,0,0.5); padding: 15px; text-align: center; }
+        .top-bar, .bottom-bar { background: rgba(0,0,0,0.5); padding: 15px; text-align: center; backdrop-filter: blur(5px); }
         .top-bar { border-bottom-left-radius: 12px; border-bottom-right-radius: 12px; }
         .bottom-bar { border-top-left-radius: 12px; border-top-right-radius: 12px; }
         h1 { margin: 0; font-size: 1.2rem; }
         #status { font-weight: bold; min-height: 20px; transition: color 0.3s; }
         #counter { font-size: 1.2rem; font-weight: bold; color: var(--primary-color); }
         .shutter-container { display: flex; justify-content: center; align-items: center; padding: 10px 0; }
-        #shutter-button { width: 70px; height: 70px; border-radius: 50%; background-color: white; border: 4px solid rgba(255,255,255,0.5); cursor: pointer; transition: transform 0.1s; }
+        #shutter-button { width: 70px; height: 70px; border-radius: 50%; background-color: white; border: 4px solid rgba(255,255,255,0.5); cursor: pointer; transition: transform 0.1s, background-color 0.2s; }
+        #shutter-button.locked { background-color: var(--viewfinder-locked); }
         #shutter-button:active { transform: scale(0.9); }
         #finish-button { position: absolute; right: 20px; top: 50%; transform: translateY(-50%); padding: 10px 15px; background-color: var(--success-color); border: none; border-radius: 8px; font-size: 1rem; color: white; cursor: pointer; }
         .spinner { border: 4px solid #888; border-top: 4px solid #fff; border-radius: 50%; width: 30px; height: 30px; animation: spin 1s linear infinite; margin: 10px auto; display: none; }
         @keyframes spin { 0% { transform: rotate(0deg); } 100% { transform: rotate(360deg); } }
         .flash { position: fixed; top: 0; left: 0; width: 100%; height: 100%; background-color: white; opacity: 0; pointer-events: none; transition: opacity 0.5s; }
         .flash.active { opacity: 0.8; }
-        .viewfinder { position: absolute; top: 50%; left: 50%; width: 85vw; max-width: 500px; height: 40vh; max-height: 300px; border: 2px solid rgba(255, 255, 255, 0.7); border-radius: 10px; transform: translate(-50%, -50%); box-shadow: 0 0 0 9999px rgba(0,0,0,0.4); pointer-events: none; }
+        .viewfinder { position: absolute; top: 50%; left: 50%; width: 85vw; max-width: 500px; height: 40vh; max-height: 300px; border: 3px solid var(--viewfinder-default); border-radius: 12px; transform: translate(-50%, -50%); box-shadow: 0 0 0 9999px rgba(0,0,0,0.5); pointer-events: none; transition: border-color 0.2s ease-in-out; }
+        .viewfinder.locked { border-color: var(--viewfinder-locked); }
     </style>
 </head>
 <body>
@@ -43,10 +47,10 @@
             <div id="counter">0 médicament(s)</div>
         </div>
         
-        <div class="viewfinder"></div>
+        <div class="viewfinder" id="viewfinder"></div>
 
         <div class="bottom-bar">
-            <div id="status">Cadrez la vignette et appuyez sur le bouton.</div>
+            <div id="status">Cadrez la vignette dans le rectangle.</div>
             <div class="spinner" id="spinner"></div>
             <div class="shutter-container">
                 <div id="shutter-button"></div>
@@ -66,35 +70,63 @@
         const flashEffect = document.getElementById('flash');
         const shutterButton = document.getElementById('shutter-button');
         const finishButton = document.getElementById('finish-button');
+        const viewfinder = document.getElementById('viewfinder');
         
         let medicationCount = 0;
         let isProcessing = false;
         const sessionId = window.location.pathname.split('/').pop();
+        const analysisContext = canvas.getContext('2d', { willReadFrequently: true });
 
         async function startCamera() {
             try {
                 const stream = await navigator.mediaDevices.getUserMedia({
-                    video: { 
-                        facingMode: 'environment',
-                        // Ask for higher resolution for better OCR
-                        width: { ideal: 1920 },
-                        height: { ideal: 1080 }
-                    }
+                    video: { facingMode: 'environment', width: { ideal: 1280 }, height: { ideal: 720 } }
                 });
                 video.srcObject = stream;
-                // Add tap-to-focus capabilities
-                const [videoTrack] = stream.getVideoTracks();
-                if (videoTrack.getCapabilities().focusMode?.includes('continuous')) {
-                    video.addEventListener('click', event => {
-                        if (event.target !== shutterButton && event.target !== finishButton) {
-                            videoTrack.applyConstraints({ advanced: [{ focusMode: 'continuous' }] });
-                        }
-                    });
-                }
+                requestAnimationFrame(analyzeFrame); // Start the analysis loop
             } catch (err) {
                 statusDiv.textContent = 'Erreur: Caméra non accessible.';
-                console.error("Error accessing camera: ", err);
             }
+        }
+
+        function analyzeFrame() {
+            if (isProcessing || !video.srcObject || video.paused || video.ended) {
+                requestAnimationFrame(analyzeFrame);
+                return;
+            }
+            
+            // Scale canvas to a smaller size for faster analysis
+            const analysisWidth = 100;
+            const analysisHeight = video.videoHeight * (analysisWidth / video.videoWidth);
+            canvas.width = analysisWidth;
+            canvas.height = analysisHeight;
+            analysisContext.drawImage(video, 0, 0, analysisWidth, analysisHeight);
+            
+            const imageData = analysisContext.getImageData(0, 0, analysisWidth, analysisHeight);
+            const data = imageData.data;
+            let greenPixelCount = 0;
+
+            for (let i = 0; i < data.length; i += 4) {
+                const r = data[i];
+                const g = data[i + 1];
+                const b = data[i + 2];
+                // Check for a specific range of green, avoiding very dark or very bright greens
+                if (g > r && g > b && g > 60 && g < 200 && r < 150 && b < 150) {
+                    greenPixelCount++;
+                }
+            }
+            
+            const greenPercentage = (greenPixelCount / (data.length / 4)) * 100;
+
+            if (greenPercentage > 5) { // If more than 5% of the frame is the right green
+                viewfinder.classList.add('locked');
+                shutterButton.classList.add('locked');
+            } else {
+                viewfinder.classList.remove('locked');
+                shutterButton.classList.remove('locked');
+            }
+
+            requestAnimationFrame(analyzeFrame);
         }
 
         shutterButton.addEventListener('click', () => {
@@ -128,31 +160,25 @@
             flashEffect.classList.add('active');
             setTimeout(() => flashEffect.classList.remove('active'), 100);
 
-            const context = canvas.getContext('2d');
-            canvas.width = video.videoWidth;
-            canvas.height = video.videoHeight;
-            context.drawImage(video, 0, 0, canvas.width, canvas.height);
+            const captureContext = document.createElement('canvas').getContext('2d');
+            captureContext.canvas.width = video.videoWidth;
+            captureContext.canvas.height = video.videoHeight;
+            captureContext.drawImage(video, 0, 0, video.videoWidth, video.videoHeight);
 
-            canvas.toBlob(async (blob) => {
+            captureContext.canvas.toBlob(async (blob) => {
                 const formData = new FormData();
                 formData.append('file', blob, 'vignette.jpg');
 
                 try {
-                    const response = await fetch(`/api/upload-by-session/${sessionId}`, {
-                        method: 'POST',
-                        body: formData,
-                    });
-
+                    const response = await fetch(`/api/upload-by-session/${sessionId}`, { method: 'POST', body: formData });
                     if (!response.ok) {
                         const errorResult = await response.json();
                         throw new Error(errorResult.error || 'Erreur du serveur');
                     }
-
                     medicationCount++;
                     counterDiv.textContent = `${medicationCount} médicament(s)`;
                     statusDiv.textContent = '✅ Succès ! Prêt pour le suivant.';
                     statusDiv.style.color = 'var(--success-color)';
-
                 } catch (error) {
                     statusDiv.textContent = `❌ Erreur: ${error.message}`;
                     statusDiv.style.color = 'var(--danger-color)';
@@ -161,12 +187,12 @@
                         isProcessing = false;
                         spinner.style.display = 'none';
                         if (!statusDiv.textContent.startsWith('❌')) {
-                           statusDiv.textContent = 'Cadrez la vignette et appuyez sur le bouton.';
+                           statusDiv.textContent = 'Cadrez la vignette dans le rectangle.';
                            statusDiv.style.color = 'white';
                         }
                     }, 1500); 
                 }
-            }, 'image/jpeg', 0.9); // Use high quality JPEG
+            }, 'image/jpeg', 0.9);
         }
 
         startCamera();
