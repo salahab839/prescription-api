@@ -3,10 +3,11 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
-    <title>Détection Automatique de Vignettes</title>
+    <title>Scan Automatique</title>
     <style>
         :root {
             --success-color: #28a745;
+            --danger-color: #dc3545;
             --viewfinder-default: rgba(255, 255, 255, 0.7);
             --viewfinder-locked: #39ff14;
         }
@@ -85,8 +86,6 @@
         const statusDiv = document.getElementById('status');
         const finishButton = document.getElementById('finish-button');
         const beep = document.getElementById('beep');
-        
-        // --- CORRECTION : Récupérer l'ID de session depuis l'URL ---
         const sessionId = window.location.pathname.split('/').pop();
 
         let medicationCount = 0;
@@ -163,7 +162,6 @@
         function autoCapture() {
             if (isProcessing) return;
             isProcessing = true;
-            beep.play();
             
             const snapCanvas = document.createElement('canvas');
             snapCanvas.width = video.videoWidth;
@@ -174,20 +172,27 @@
                 const formData = new FormData();
                 formData.append('file', blob, 'vignette.jpg');
                 try {
-                    // --- CORRECTION : Utiliser l'ID de session dans l'URL ---
                     const response = await fetch(`/api/upload-by-session/${sessionId}`, { method: 'POST', body: formData });
-                    if (response.ok) {
+                    const result = await response.json();
+
+                    if (response.ok && result.status === 'success') {
+                        beep.play();
                         medicationCount++;
                         counterDiv.textContent = `${medicationCount} médicament(s)`;
                         statusDiv.textContent = '✅ Capturé ! Recherche du suivant...';
+                        statusDiv.style.color = 'var(--success-color)';
                     } else {
-                        const errorData = await response.json();
-                        throw new Error(errorData.error || "Erreur serveur");
+                        throw new Error(result.message || "Vignette illisible");
                     }
                 } catch (e) {
                     statusDiv.textContent = `❌ ${e.message}`;
+                    statusDiv.style.color = 'var(--danger-color)';
                 } finally {
-                    setTimeout(() => { isProcessing = false; detectionStartTime = null; }, 2000);
+                    setTimeout(() => { 
+                        isProcessing = false; 
+                        detectionStartTime = null;
+                        statusDiv.style.color = 'white';
+                    }, 2000);
                 }
             }, 'image/jpeg', 0.9);
         }
@@ -196,7 +201,6 @@
             finishButton.disabled = true;
             statusDiv.textContent = 'Finalisation...';
             try {
-                // --- CORRECTION : Utiliser l'ID de session dans l'URL ---
                 await fetch(`/api/finish-session/${sessionId}`, { method: 'POST' });
                 statusDiv.textContent = 'Session terminée ✅';
                 statusDiv.style.color = '#28a745';
@@ -207,7 +211,7 @@
             }
         });
 
-        // N'appelle startCamera qu'après l'interaction de l'utilisateur
+        startCamera();
     </script>
 </body>
 </html>
