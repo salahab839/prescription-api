@@ -50,6 +50,14 @@ try:
 except Exception as e:
     print(f"ERREUR critique lors du chargement de la base de données : {e}")
 
+# --- Intelligent PPA Parser ---
+def parse_ppa(text):
+    if not isinstance(text, str): return ""
+    if '=' in text:
+        text = text.split('=')[-1]
+    cleaned_text = re.sub(r'[^0-9,.]', '', text).strip()
+    return cleaned_text.replace(',', '.')
+
 # --- Image Processing Logic ---
 def process_image_data(image_content):
     response = vision_client.text_detection(image=vision.Image(content=image_content))
@@ -71,7 +79,7 @@ def process_image_data(image_content):
     )
     ai_data = json.loads(chat_completion.choices[0].message.content)
     
-    ppa_raw = str(ai_data.get('ppa', '')); ppa_cleaned = re.sub(r'[^0-9,.]', '', ppa_raw); ai_data['ppa'] = ppa_cleaned.replace(',', '.')
+    ai_data['ppa'] = parse_ppa(ai_data.get('ppa', ''))
 
     def get_verified_response(db_row, score, status="Vérifié"):
         return {"nom": db_row.get('Nom Commercial'), "dosage": db_row.get('Dosage'), "conditionnement": db_row.get('Présentation'), "ppa": ai_data.get('ppa'), "match_score": score, "status": status}
@@ -101,7 +109,6 @@ def process_image_data(image_content):
         if score_candidate_name >= 60:
             return get_verified_response(candidate_names[best_candidate_name], int((score_details * 0.7) + (score_candidate_name * 0.3)), status="Auto-Corrigé")
 
-    # If all paths fail, return a failure status
     return {"status": "Échec de la reconnaissance"}
 
 # --- API Routes ---
@@ -124,9 +131,9 @@ def upload_by_session(session_id):
         if processed_data.get("status") != "Échec de la reconnaissance":
             image_base64 = base64.b64encode(image_content).decode('utf-8')
             SESSIONS[session_id]['medications'].append({"data": processed_data, "image_base64": image_base64})
+            return jsonify({"status": "success", "message": "Médicament ajouté."})
         else:
-            print("Vignette illisible, ignorée.")
-        return jsonify({"status": "success"})
+            return jsonify({"status": "failure", "message": "Vignette illisible"})
     except Exception as e:
         return jsonify({"error": f"Erreur de traitement: {e}"}), 500
 
