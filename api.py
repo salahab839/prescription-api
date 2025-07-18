@@ -33,13 +33,17 @@ def normalize_string(s):
     s = re.sub(r'[^a-z0-9]', ' ', s); return re.sub(r'\s+', ' ', s).strip()
 
 def build_reference_string(row, include_name=True, include_details=True):
-    name_part = row.get('Nom Commercial', '') if include_name else ''; dosage_part = row.get('Dosage', '') if include_details else ''; presentation_part = row.get('Présentation', '') if include_details else ''; return f"{name_part} {dosage_part} {presentation_part}".strip()
+    name_part = row.get('Nom Commercial', '') if include_name else ''
+    dosage_part = row.get('Dosage', '') if include_details else ''
+    presentation_part = row.get('Présentation', '') if include_details else ''
+    return f"{name_part} {dosage_part} {presentation_part}".strip()
 
 DB_SIGNATURE_MAP = {}; DB_DOSAGE_PRES_MAP = {}; DB_NAMES_MAP = {}
 try:
     df = pd.read_excel(DB_PATH) 
     for index, row in df.iterrows():
-        row_dict = row.to_dict(); full_signature = normalize_string(build_reference_string(row)); DB_SIGNATURE_MAP[full_signature] = row_dict
+        row_dict = row.to_dict()
+        full_signature = normalize_string(build_reference_string(row)); DB_SIGNATURE_MAP[full_signature] = row_dict
         dosage_pres_signature = normalize_string(build_reference_string(row, include_name=False))
         if dosage_pres_signature not in DB_DOSAGE_PRES_MAP: DB_DOSAGE_PRES_MAP[dosage_pres_signature] = []
         DB_DOSAGE_PRES_MAP[dosage_pres_signature].append(row_dict)
@@ -82,7 +86,18 @@ def process_image_data(image_content):
     ai_data['ppa'] = parse_ppa(ai_data.get('ppa', ''))
 
     def get_verified_response(db_row, score, status="Vérifié"):
-        return {"nom": db_row.get('Nom Commercial'), "dosage": db_row.get('Dosage'), "conditionnement": db_row.get('Présentation'), "ppa": ai_data.get('ppa'), "match_score": score, "status": status}
+        return {
+            "nom": db_row.get('Nom Commercial'), 
+            "dosage": db_row.get('Dosage'), 
+            "conditionnement": db_row.get('Présentation'), 
+            "ppa": ai_data.get('ppa'), 
+            "match_score": score, 
+            "status": status,
+            "posologie_qte_prise": "1",
+            "posologie_unite": db_row.get('Forme', ''), # Get 'Forme' from Excel
+            "posologie_frequence": "3",
+            "posologie_periode": "par jour"
+        }
 
     ocr_full_sig = normalize_string(f"{ai_data.get('nom','')} {ai_data.get('dosage','')} {ai_data.get('conditionnement','')}")
     ocr_name_sig = normalize_string(ai_data.get('nom',''))
