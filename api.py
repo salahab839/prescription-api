@@ -5,6 +5,7 @@ import re
 import pandas as pd
 import uuid
 import time
+import base64 # Nécessaire pour encoder les images
 from flask import Flask, request, jsonify, render_template
 from flask_cors import CORS
 from google.cloud import vision
@@ -32,17 +33,13 @@ def normalize_string(s):
     s = re.sub(r'[^a-z0-9]', ' ', s); return re.sub(r'\s+', ' ', s).strip()
 
 def build_reference_string(row, include_name=True, include_details=True):
-    name_part = row.get('Nom Commercial', '') if include_name else ''
-    dosage_part = row.get('Dosage', '') if include_details else ''
-    presentation_part = row.get('Présentation', '') if include_details else ''
-    return f"{name_part} {dosage_part} {presentation_part}".strip()
+    name_part = row.get('Nom Commercial', '') if include_name else ''; dosage_part = row.get('Dosage', '') if include_details else ''; presentation_part = row.get('Présentation', '') if include_details else ''; return f"{name_part} {dosage_part} {presentation_part}".strip()
 
 DB_SIGNATURE_MAP = {}; DB_DOSAGE_PRES_MAP = {}; DB_NAMES_MAP = {}
 try:
     df = pd.read_excel(DB_PATH) 
     for index, row in df.iterrows():
-        row_dict = row.to_dict()
-        full_signature = normalize_string(build_reference_string(row)); DB_SIGNATURE_MAP[full_signature] = row_dict
+        row_dict = row.to_dict(); full_signature = normalize_string(build_reference_string(row)); DB_SIGNATURE_MAP[full_signature] = row_dict
         dosage_pres_signature = normalize_string(build_reference_string(row, include_name=False))
         if dosage_pres_signature not in DB_DOSAGE_PRES_MAP: DB_DOSAGE_PRES_MAP[dosage_pres_signature] = []
         DB_DOSAGE_PRES_MAP[dosage_pres_signature].append(row_dict)
@@ -74,14 +71,7 @@ def process_image_data(image_content):
     )
     ai_data = json.loads(chat_completion.choices[0].message.content)
     
-    # --- CORRECTED PPA FORMATTING ---
-    ppa_raw = str(ai_data.get('ppa', ''))
-    # Keep only digits, period, and comma
-    ppa_numeric_str = re.sub(r'[^0-9.,]', '', ppa_raw)
-    # Replace comma with period for CHIFA compatibility
-    ppa_formatted = ppa_numeric_str.replace(',', '.')
-    ai_data['ppa'] = ppa_formatted
-    # --- END OF FIX ---
+    ppa_raw = str(ai_data.get('ppa', '')); ppa_cleaned = re.sub(r'[^0-9.]', '', ppa_raw); ai_data['ppa'] = ppa_cleaned.replace(',', '.')
 
     def get_verified_response(db_row, score, status="Vérifié"):
         return {"nom": db_row.get('Nom Commercial'), "dosage": db_row.get('Dosage'), "conditionnement": db_row.get('Présentation'), "ppa": ai_data.get('ppa'), "match_score": score, "status": status}
@@ -113,13 +103,10 @@ def process_image_data(image_content):
 
     return {"nom": ai_data.get('nom'), "dosage": ai_data.get('dosage'), "conditionnement": ai_data.get('conditionnement'), "ppa": ai_data.get('ppa'), "match_score": score_full, "status": "Non Vérifié"}
 
-# --- API Routes for Session Workflow ---
+# --- API Routes ---
 @app.route('/api/create-session', methods=['POST'])
 def create_session():
-    session_id = str(uuid.uuid4())
-    SESSIONS[session_id] = {"status": "pending", "medications": [], "timestamp": time.time()}
-    print(f"Session créée: {session_id}")
-    return jsonify({"session_id": session_id})
+    session_id = str(uuid.uuid4()); SESSIONS[session_id] = {"status": "pending", "medications": [], "timestamp": time.time()}; return jsonify({"session_id": session_id})
 
 @app.route('/phone-upload/<session_id>')
 def phone_upload_page(session_id):
@@ -131,28 +118,26 @@ def upload_by_session(session_id):
         return jsonify({"error": "Session invalide ou terminée"}), 404
     if 'file' not in request.files: return jsonify({"error": "Aucun fichier"}), 400
     try:
-        processed_data = process_image_data(request.files['file'].read())
-        SESSIONS[session_id]['medications'].append(processed_data)
-        print(f"Médicament ajouté à la session {session_id}. Total: {len(SESSIONS[session_id]['medications'])}")
+        image_content = request.files['file'].read()
+        processed_data = process_image_data(image_content)
+        # Encode the image in Base64 to send it to the desktop app
+        image_base64 = base64.b64encode(image_content).decode('utf-8')
+        # Store both data and image
+        SESSIONS[session_id]['medications'].append({"data": processed_data, "image_base64": image_base64})
         return jsonify({"status": "success"})
     except Exception as e:
-        print(f"ERREUR DANS L'ENDPOINT /api/upload-by-session: {e}"); traceback.print_exc()
         return jsonify({"error": f"Erreur de traitement: {e}"}), 500
 
 @app.route('/api/finish-session/<session_id>', methods=['POST'])
 def finish_session(session_id):
-    if session_id in SESSIONS:
-        SESSIONS[session_id]['status'] = 'finished'
-        print(f"Session marquée comme terminée: {session_id}")
-        return jsonify({"status": "success"})
+    if session_id in SESSIONS: SESSIONS[session_id]['status'] = 'finished'; return jsonify({"status": "success"})
     return jsonify({"error": "Session invalide"}), 404
 
 @app.route('/api/check-session/<session_id>')
 def check_session(session_id):
-    if session_id not in SESSIONS:
-        return jsonify({"status": "invalid"}), 404
+    if session_id not in SESSIONS: return jsonify({"status": "invalid"}), 404
     session_info = SESSIONS[session_id]
-    if time.time() - session_info.get("timestamp", 0) > 600: # 10 minute timeout
+    if time.time() - session_info.get("timestamp", 0) > 600:
         if session_id in SESSIONS: del SESSIONS[session_id]
         return jsonify({"status": "expired"}), 410
     return jsonify({"status": session_info['status']})
@@ -161,17 +146,18 @@ def check_session(session_id):
 def get_session_data(session_id):
     if session_id not in SESSIONS: return jsonify({"error": "Session invalide"}), 404
     session_data = SESSIONS.pop(session_id, {"medications": []})
-    print(f"Session {session_id} terminée. Envoi de {len(session_data['medications'])} médicaments.")
     return jsonify({"medications": session_data['medications']})
 
-# Fallback endpoint
 @app.route('/process_vignette', methods=['POST'])
 def process_vignette_endpoint():
     if 'file' not in request.files: return jsonify({"error": "No file part"}), 400
     try:
-        return jsonify(process_image_data(request.files['file'].read()))
+        image_content = request.files['file'].read()
+        processed_data = process_image_data(image_content)
+        # Also return the image for the verification window
+        image_base64 = base64.b64encode(image_content).decode('utf-8')
+        return jsonify({"data": processed_data, "image_base64": image_base64})
     except Exception as e:
-        print(f"ERREUR DANS L'ENDPOINT /process_vignette: {e}"); traceback.print_exc()
         return jsonify({"error": f"Une erreur interne est survenue: {e}"}), 500
 
 if __name__ == '__main__':
