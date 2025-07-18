@@ -24,6 +24,7 @@
     <div id="camera-container">
         <video id="video" playsinline autoplay muted></video>
         <canvas id="canvas" style="display:none;"></canvas>
+        <audio id="beep" src="https://actions.google.com/sounds/v1/alarms/beep_short.ogg"></audio>
     </div>
 
     <div id="overlay">
@@ -46,6 +47,7 @@
         const counterDiv = document.getElementById('counter');
         const statusDiv = document.getElementById('status');
         const finishButton = document.getElementById('finish-button');
+        const beep = document.getElementById('beep');
 
         let medicationCount = 0;
         let isProcessing = false;
@@ -75,19 +77,30 @@
             const imageData = ctx.getImageData(0, 0, canvas.width, canvas.height);
             const data = imageData.data;
             let greenPixels = 0;
+            let bbox = { xMin: canvas.width, xMax: 0, yMin: canvas.height, yMax: 0 };
 
             for (let i = 0; i < data.length; i += 4) {
+                const index = i / 4;
+                const x = index % canvas.width;
+                const y = Math.floor(index / canvas.width);
                 const r = data[i];
                 const g = data[i + 1];
                 const b = data[i + 2];
                 if (g > r + 30 && g > b + 30 && g > 60 && g < 200 && r < 150 && b < 150) {
                     greenPixels++;
+                    if (x < bbox.xMin) bbox.xMin = x;
+                    if (x > bbox.xMax) bbox.xMax = x;
+                    if (y < bbox.yMin) bbox.yMin = y;
+                    if (y > bbox.yMax) bbox.yMax = y;
                 }
             }
 
             const greenRatio = greenPixels / (data.length / 4);
+            const width = bbox.xMax - bbox.xMin;
+            const height = bbox.yMax - bbox.yMin;
+            const aspectRatio = width / height;
 
-            if (greenRatio > 0.05) {
+            if (greenRatio > 0.05 && aspectRatio > 1.5 && aspectRatio < 4) {
                 viewfinder.classList.add('locked');
                 statusDiv.textContent = 'Vignette détectée - capture en cours...';
                 autoCapture();
@@ -101,6 +114,7 @@
 
         function autoCapture() {
             isProcessing = true;
+            beep.play();
             const snapCanvas = document.createElement('canvas');
             const snapCtx = snapCanvas.getContext('2d');
             snapCanvas.width = video.videoWidth;
