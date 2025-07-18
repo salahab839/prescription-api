@@ -3,17 +3,17 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
-    <title>Scan Automatique</title>
+    <title>Détection Automatique de Vignettes</title>
     <style>
         :root {
             --success-color: #28a745;
             --viewfinder-default: rgba(255, 255, 255, 0.7);
-            --viewfinder-locked: #39ff14; /* Vert vif */
+            --viewfinder-locked: #39ff14;
         }
         body { margin: 0; background-color: #000; color: white; font-family: sans-serif; overflow: hidden; }
-        #camera-container { position: fixed; top: 0; left: 0; width: 100%; height: 100%; visibility: hidden; }
+        #camera-container { position: fixed; top: 0; left: 0; width: 100%; height: 100%; }
         #video { width: 100%; height: 100%; object-fit: cover; }
-        #overlay { position: fixed; top: 0; left: 0; width: 100%; height: 100%; display: flex; flex-direction: column; justify-content: space-between; visibility: hidden; }
+        #overlay { position: fixed; top: 0; left: 0; width: 100%; height: 100%; display: flex; flex-direction: column; justify-content: space-between; }
         .top-bar, .bottom-bar { background: rgba(0,0,0,0.6); padding: 15px; text-align: center; backdrop-filter: blur(5px); }
         h1 { margin: 0; font-size: 1.2rem; }
         #status { font-weight: bold; min-height: 20px; transition: color 0.3s; }
@@ -35,34 +35,29 @@
             transition: width 0.5s linear;
         }
         #finish-button { padding: 10px 20px; background-color: var(--success-color); border: none; border-radius: 8px; font-size: 1rem; color: white; cursor: pointer; }
-        
-        /* Start Screen Styles */
         #start-screen {
             position: fixed; top: 0; left: 0; width: 100%; height: 100%;
             background-color: #222;
-            display: flex; justify-content: center; align-items: center;
-            z-index: 10;
+            display: flex; justify-content: center; align-items: center; z-index: 10;
         }
         #start-button {
             padding: 20px 40px; font-size: 1.5rem; color: white;
-            background-color: #007bff; border: none; border-radius: 12px;
-            cursor: pointer;
+            background-color: #007bff; border: none; border-radius: 12px; cursor: pointer;
         }
     </style>
 </head>
 <body>
-    <!-- NOUVEAU : Écran de démarrage pour initialiser l'audio -->
     <div id="start-screen">
         <button id="start-button">Démarrer le Scan</button>
     </div>
 
-    <div id="camera-container">
+    <div id="camera-container" style="visibility: hidden;">
         <video id="video" playsinline autoplay muted></video>
         <canvas id="canvas" style="display:none;"></canvas>
         <audio id="beep" src="https://actions.google.com/sounds/v1/alarms/beep_short.ogg" preload="auto"></audio>
     </div>
 
-    <div id="overlay">
+    <div id="overlay" style="visibility: hidden;">
         <div class="top-bar">
             <h1>Scan Automatique</h1>
             <div id="counter">0 médicament(s)</div>
@@ -90,20 +85,19 @@
         const statusDiv = document.getElementById('status');
         const finishButton = document.getElementById('finish-button');
         const beep = document.getElementById('beep');
+        
+        // --- CORRECTION : Récupérer l'ID de session depuis l'URL ---
         const sessionId = window.location.pathname.split('/').pop();
 
         let medicationCount = 0;
         let isProcessing = false;
         let detectionStartTime = null;
-        const DETECTION_DELAY = 500; // 0.5 seconde
+        const DETECTION_DELAY = 500;
 
-        // NOUVEAU : Logique de l'écran de démarrage
         startButton.addEventListener('click', () => {
-            // "Débloque" l'audio pour le navigateur
-            beep.play();
+            beep.play().catch(e => console.log("Interaction needed for audio"));
             beep.pause();
             beep.currentTime = 0;
-
             startScreen.style.display = 'none';
             cameraContainer.style.visibility = 'visible';
             overlay.style.visibility = 'visible';
@@ -147,9 +141,7 @@
             const greenRatio = greenPixels / (data.length / 4);
 
             if (greenRatio > 0.05) {
-                if (detectionStartTime === null) {
-                    detectionStartTime = Date.now();
-                }
+                if (detectionStartTime === null) detectionStartTime = Date.now();
                 const elapsed = Date.now() - detectionStartTime;
                 viewfinder.classList.add('locked');
                 progressBar.style.width = `${Math.min(100, (elapsed / DETECTION_DELAY) * 100)}%`;
@@ -171,7 +163,7 @@
         function autoCapture() {
             if (isProcessing) return;
             isProcessing = true;
-            beep.play(); // Le son est joué ici
+            beep.play();
             
             const snapCanvas = document.createElement('canvas');
             snapCanvas.width = video.videoWidth;
@@ -182,16 +174,18 @@
                 const formData = new FormData();
                 formData.append('file', blob, 'vignette.jpg');
                 try {
+                    // --- CORRECTION : Utiliser l'ID de session dans l'URL ---
                     const response = await fetch(`/api/upload-by-session/${sessionId}`, { method: 'POST', body: formData });
                     if (response.ok) {
                         medicationCount++;
                         counterDiv.textContent = `${medicationCount} médicament(s)`;
                         statusDiv.textContent = '✅ Capturé ! Recherche du suivant...';
                     } else {
-                        throw new Error("Erreur serveur");
+                        const errorData = await response.json();
+                        throw new Error(errorData.error || "Erreur serveur");
                     }
                 } catch (e) {
-                    statusDiv.textContent = '❌ Erreur d\'envoi';
+                    statusDiv.textContent = `❌ ${e.message}`;
                 } finally {
                     setTimeout(() => { isProcessing = false; detectionStartTime = null; }, 2000);
                 }
@@ -202,18 +196,18 @@
             finishButton.disabled = true;
             statusDiv.textContent = 'Finalisation...';
             try {
+                // --- CORRECTION : Utiliser l'ID de session dans l'URL ---
                 await fetch(`/api/finish-session/${sessionId}`, { method: 'POST' });
                 statusDiv.textContent = 'Session terminée ✅';
                 statusDiv.style.color = '#28a745';
-                if (video.srcObject) {
-                    video.srcObject.getTracks().forEach(track => track.stop());
-                }
+                if (video.srcObject) video.srcObject.getTracks().forEach(track => track.stop());
             } catch (err) {
                 statusDiv.textContent = 'Erreur lors de la finalisation';
                 finishButton.disabled = false;
             }
         });
 
+        // N'appelle startCamera qu'après l'interaction de l'utilisateur
     </script>
 </body>
 </html>
