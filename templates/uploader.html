@@ -35,7 +35,6 @@
             background-color: var(--viewfinder-locked);
             transition: width 0.5s linear;
         }
-        #finish-button { padding: 10px 20px; background-color: var(--success-color); border: none; border-radius: 8px; font-size: 1rem; color: white; cursor: pointer; }
         #start-screen {
             position: fixed; top: 0; left: 0; width: 100%; height: 100%;
             background-color: #222;
@@ -68,7 +67,7 @@
         </div>
         <div class="bottom-bar">
             <div id="status">Recherche de vignette...</div>
-            <button id="finish-button">Terminer la Session</button>
+            <!-- Le bouton Terminer a été retiré d'ici -->
         </div>
     </div>
 
@@ -84,7 +83,6 @@
         const progressBar = document.getElementById('progress-bar');
         const counterDiv = document.getElementById('counter');
         const statusDiv = document.getElementById('status');
-        const finishButton = document.getElementById('finish-button');
         const beep = document.getElementById('beep');
         const sessionId = window.location.pathname.split('/').pop();
 
@@ -197,21 +195,13 @@
             }, 'image/jpeg', 0.9);
         }
 
-        finishButton.addEventListener('click', async () => {
-            finishButton.disabled = true;
-            statusDiv.textContent = 'Finalisation...';
-            try {
-                await fetch(`/api/finish-session/${sessionId}`, { method: 'POST' });
-                statusDiv.textContent = 'Session terminée ✅';
-                statusDiv.style.color = '#28a745';
-                if (video.srcObject) video.srcObject.getTracks().forEach(track => track.stop());
-            } catch (err) {
-                statusDiv.textContent = 'Erreur lors de la finalisation';
-                finishButton.disabled = false;
+        // Notifier le serveur quand l'utilisateur quitte la page
+        window.addEventListener('beforeunload', () => {
+            if (sessionId) {
+                // Utilise sendBeacon pour un envoi plus fiable en arrière-plan
+                navigator.sendBeacon(`/api/finish-session/${sessionId}`, new Blob());
             }
         });
-
-        startCamera();
     </script>
 </body>
 </html>
