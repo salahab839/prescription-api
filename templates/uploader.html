@@ -2,113 +2,144 @@
 <html lang="fr">
 <head>
     <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
     <title>Scanner de Session</title>
     <style>
-        body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; display: flex; justify-content: center; align-items: center; height: 100vh; margin: 0; background-color: #f0f2f5; }
-        .container { text-align: center; padding: 20px; background-color: white; border-radius: 12px; box-shadow: 0 4px 12px rgba(0,0,0,0.1); width: 90%; max-width: 400px; }
-        h1 { color: #333; }
-        p { color: #666; font-size: 1.1rem; }
-        .upload-btn { display: inline-block; padding: 15px 30px; margin-top: 15px; background-color: #007bff; color: white; font-size: 18px; font-weight: bold; border-radius: 8px; cursor: pointer; transition: background-color 0.2s; width: 80%; }
-        .finish-btn { background-color: #28a745; margin-top: 10px; }
-        .upload-btn:hover { background-color: #0056b3; }
-        .finish-btn:hover { background-color: #218838; }
-        #file-input { display: none; }
-        #status { margin-top: 20px; font-weight: bold; min-height: 24px; }
-        #counter { font-size: 1.5rem; font-weight: bold; color: #007bff; margin-top: 10px; }
-        .spinner { border: 4px solid #f3f3f3; border-top: 4px solid #007bff; border-radius: 50%; width: 30px; height: 30px; animation: spin 1s linear infinite; margin: 20px auto; display: none; }
+        body { margin: 0; background-color: #000; color: white; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; }
+        #video-container { position: fixed; top: 0; left: 0; width: 100%; height: 100%; display: flex; justify-content: center; align-items: center; }
+        #video { width: 100%; height: 100%; object-fit: cover; }
+        #overlay { position: fixed; top: 0; left: 0; width: 100%; height: 100%; display: flex; flex-direction: column; justify-content: space-between; align-items: center; background: rgba(0,0,0,0.2); cursor: pointer; }
+        .overlay-text { background: rgba(0,0,0,0.5); padding: 10px 20px; border-radius: 10px; margin: 20px; text-align: center; }
+        #status { font-weight: bold; font-size: 1.1rem; min-height: 24px; }
+        #counter { font-size: 1.5rem; font-weight: bold; }
+        .spinner { border: 4px solid #f3f3f3; border-top: 4px solid #fff; border-radius: 50%; width: 40px; height: 40px; animation: spin 1s linear infinite; display: none; }
         @keyframes spin { 0% { transform: rotate(0deg); } 100% { transform: rotate(360deg); } }
+        .flash { position: fixed; top: 0; left: 0; width: 100%; height: 100%; background-color: white; opacity: 0; pointer-events: none; transition: opacity 0.5s; }
+        .flash.active { opacity: 0.8; }
+        .viewfinder { position: absolute; top: 50%; left: 50%; width: 85vw; max-width: 500px; height: 40vh; max-height: 300px; border: 2px solid rgba(255, 255, 255, 0.7); border-radius: 10px; transform: translate(-50%, -50%); box-shadow: 0 0 0 9999px rgba(0,0,0,0.5); }
+        #finish-button { padding: 10px 20px; background-color: #28a745; border: none; border-radius: 8px; font-size: 16px; font-weight: bold; color: white; cursor: pointer; }
     </style>
 </head>
 <body>
-    <div class="container">
-        <h1>Session de Scan</h1>
-        <p>Prenez en photo chaque vignette de l'ordonnance.</p>
-        
-        <div id="counter">0 médicament(s) ajouté(s)</div>
-
-        <label for="file-input" class="upload-btn" id="upload-label">
-            📷 Ajouter une vignette
-        </label>
-        <input id="file-input" type="file" accept="image/*" capture="environment">
-
-        <button class="upload-btn finish-btn" id="finish-btn">Terminer la session</button>
-
-        <div class="spinner" id="spinner"></div>
-        <div id="status"></div>
+    <div id="video-container">
+        <video id="video" playsinline autoplay muted></video>
+        <canvas id="canvas" style="display:none;"></canvas>
     </div>
 
+    <div id="overlay">
+        <div class="overlay-text">
+            <h1>Session de Scan</h1>
+            <p>Cadrez la vignette et tapez sur l'écran pour la capturer.</p>
+        </div>
+        
+        <div class="viewfinder"></div>
+
+        <div class="overlay-text">
+            <div id="counter">0 médicament(s)</div>
+            <div id="status"></div>
+            <div class="spinner" id="spinner"></div>
+            <button id="finish-button">Terminer</button>
+        </div>
+    </div>
+    
+    <div class="flash" id="flash"></div>
+
     <script>
-        const fileInput = document.getElementById('file-input');
+        const video = document.getElementById('video');
+        const canvas = document.getElementById('canvas');
+        const overlay = document.getElementById('overlay');
         const statusDiv = document.getElementById('status');
         const spinner = document.getElementById('spinner');
-        const uploadLabel = document.getElementById('upload-label');
-        const finishBtn = document.getElementById('finish-btn');
         const counterDiv = document.getElementById('counter');
+        const flashEffect = document.getElementById('flash');
+        const finishButton = document.getElementById('finish-button');
         
         let medicationCount = 0;
+        let isProcessing = false;
         const sessionId = window.location.pathname.split('/').pop();
 
-        fileInput.addEventListener('change', (event) => {
-            const file = event.target.files[0];
-            if (!file) return;
-            uploadImage(file);
+        async function startCamera() {
+            try {
+                const stream = await navigator.mediaDevices.getUserMedia({
+                    video: { facingMode: 'environment' } // Use the back camera
+                });
+                video.srcObject = stream;
+            } catch (err) {
+                statusDiv.textContent = 'Erreur: Impossible d\'accéder à la caméra.';
+                console.error("Error accessing camera: ", err);
+            }
+        }
+
+        overlay.addEventListener('click', (event) => {
+            // Prevent capture if the finish button was clicked
+            if (event.target === finishButton) return;
+            if (isProcessing) return;
+            captureAndUpload();
         });
 
-        finishBtn.addEventListener('click', async () => {
-            setLoading(true);
+        finishButton.addEventListener('click', async () => {
+            if (isProcessing) return;
+            isProcessing = true; // Prevent other actions
+            statusDiv.textContent = 'Finalisation de la session...';
+            spinner.style.display = 'block';
             try {
                 await fetch(`/api/finish-session/${sessionId}`, { method: 'POST' });
                 statusDiv.textContent = 'Session terminée. Vous pouvez fermer cette page.';
                 statusDiv.style.color = 'green';
-                uploadLabel.style.display = 'none';
-                finishBtn.style.display = 'none';
+                overlay.style.pointerEvents = 'none'; // Disable further clicks
             } catch (error) {
                 statusDiv.textContent = 'Erreur lors de la finalisation.';
                 statusDiv.style.color = 'red';
-            } finally {
-                setLoading(false);
+                isProcessing = false;
             }
         });
 
-        async function uploadImage(file) {
-            setLoading(true);
-            statusDiv.textContent = 'Analyse de l\'image...';
-            
-            const formData = new FormData();
-            formData.append('file', file);
+        async function captureAndUpload() {
+            isProcessing = true;
+            statusDiv.textContent = 'Analyse en cours...';
+            spinner.style.display = 'block';
 
-            try {
-                const response = await fetch(`/api/upload-by-session/${sessionId}`, {
-                    method: 'POST',
-                    body: formData,
-                });
+            flashEffect.classList.add('active');
+            setTimeout(() => flashEffect.classList.remove('active'), 100);
 
-                if (!response.ok) {
-                    const errorResult = await response.json();
-                    throw new Error(errorResult.error || 'Erreur du serveur');
+            const context = canvas.getContext('2d');
+            canvas.width = video.videoWidth;
+            canvas.height = video.videoHeight;
+            context.drawImage(video, 0, 0, canvas.width, canvas.height);
+
+            canvas.toBlob(async (blob) => {
+                const formData = new FormData();
+                formData.append('file', blob, 'vignette.jpg');
+
+                try {
+                    const response = await fetch(`/api/upload-by-session/${sessionId}`, {
+                        method: 'POST',
+                        body: formData,
+                    });
+
+                    if (!response.ok) {
+                        const errorResult = await response.json();
+                        throw new Error(errorResult.error || 'Erreur du serveur');
+                    }
+
+                    medicationCount++;
+                    counterDiv.textContent = `${medicationCount} médicament(s)`;
+                    statusDiv.textContent = '✅ Succès ! Prêt pour le suivant.';
+                    statusDiv.style.color = 'green';
+
+                } catch (error) {
+                    statusDiv.textContent = `❌ Erreur: ${error.message}`;
+                    statusDiv.style.color = 'red';
+                } finally {
+                    setTimeout(() => {
+                        isProcessing = false;
+                        spinner.style.display = 'none';
+                    }, 500); // Add a small delay
                 }
-
-                medicationCount++;
-                counterDiv.textContent = `${medicationCount} médicament(s) ajouté(s)`;
-                statusDiv.textContent = '✅ Succès ! Prêt pour le suivant.';
-                statusDiv.style.color = 'green';
-
-            } catch (error) {
-                statusDiv.textContent = `❌ Erreur: ${error.message}`;
-                statusDiv.style.color = 'red';
-            } finally {
-                fileInput.value = '';
-                setLoading(false);
-            }
+            }, 'image/jpeg');
         }
 
-        function setLoading(isLoading) {
-            spinner.style.display = isLoading ? 'block' : 'none';
-            uploadLabel.style.pointerEvents = isLoading ? 'none' : 'auto';
-            uploadLabel.style.backgroundColor = isLoading ? '#a0c7ff' : '#007bff';
-            finishBtn.disabled = isLoading;
-        }
+        startCamera();
     </script>
 </body>
 </html>
