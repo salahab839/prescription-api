@@ -3,28 +3,45 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
-    <title>Détection Automatique de Vignettes</title>
+    <title>Scan Automatique</title>
     <style>
-        body { margin: 0; background-color: #111; color: white; font-family: sans-serif; overflow: hidden; }
+        :root {
+            --success-color: #28a745;
+            --viewfinder-default: rgba(255, 255, 255, 0.7);
+            --viewfinder-locked: #39ff14; /* Vert vif */
+        }
+        body { margin: 0; background-color: #000; color: white; font-family: sans-serif; overflow: hidden; }
         #camera-container { position: fixed; top: 0; left: 0; width: 100%; height: 100%; }
         #video { width: 100%; height: 100%; object-fit: cover; }
         #overlay { position: fixed; top: 0; left: 0; width: 100%; height: 100%; display: flex; flex-direction: column; justify-content: space-between; }
-        .top-bar, .bottom-bar { background: rgba(0,0,0,0.5); padding: 15px; text-align: center; }
-        .top-bar { border-bottom-left-radius: 12px; border-bottom-right-radius: 12px; }
-        .bottom-bar { border-top-left-radius: 12px; border-top-right-radius: 12px; position: relative; }
+        .top-bar, .bottom-bar { background: rgba(0,0,0,0.6); padding: 15px; text-align: center; backdrop-filter: blur(5px); }
         h1 { margin: 0; font-size: 1.2rem; }
         #status { font-weight: bold; min-height: 20px; transition: color 0.3s; }
         #counter { font-size: 1.2rem; font-weight: bold; color: #007bff; }
-        .viewfinder { position: absolute; top: 50%; left: 50%; width: 85vw; max-width: 500px; height: 40vh; max-height: 300px; border: 3px solid rgba(255,255,255,0.7); border-radius: 12px; transform: translate(-50%, -50%); box-shadow: 0 0 0 9999px rgba(0,0,0,0.5); pointer-events: none; transition: border-color 0.2s ease-in-out; }
-        .viewfinder.locked { border-color: #39ff14; }
-        #finish-button { position: absolute; right: 20px; top: 50%; transform: translateY(-50%); padding: 10px 15px; background-color: #28a745; border: none; border-radius: 8px; font-size: 1rem; color: white; cursor: pointer; }
+        .viewfinder {
+            position: absolute; top: 50%; left: 50%;
+            width: 85vw; max-width: 500px; height: 40vh; max-height: 300px;
+            border: 3px solid var(--viewfinder-default);
+            border-radius: 12px;
+            transform: translate(-50%, -50%);
+            box-shadow: 0 0 0 9999px rgba(0,0,0,0.5);
+            transition: border-color 0.3s ease-in-out;
+        }
+        .viewfinder.locked { border-color: var(--viewfinder-locked); }
+        #progress-bar {
+            position: absolute; bottom: 0; left: 0;
+            height: 5px; width: 0%;
+            background-color: var(--viewfinder-locked);
+            transition: width 0.5s linear;
+        }
+        #finish-button { padding: 10px 20px; background-color: var(--success-color); border: none; border-radius: 8px; font-size: 1rem; color: white; cursor: pointer; }
     </style>
 </head>
 <body>
     <div id="camera-container">
         <video id="video" playsinline autoplay muted></video>
         <canvas id="canvas" style="display:none;"></canvas>
-        <audio id="beep" src="https://actions.google.com/sounds/v1/alarms/beep_short.ogg"></audio>
+        <audio id="beep" src="https://actions.google.com/sounds/v1/alarms/beep_short.ogg" preload="auto"></audio>
     </div>
 
     <div id="overlay">
@@ -32,10 +49,12 @@
             <h1>Scan Automatique</h1>
             <div id="counter">0 médicament(s)</div>
         </div>
-        <div class="viewfinder" id="viewfinder"></div>
+        <div class="viewfinder" id="viewfinder">
+            <div id="progress-bar"></div>
+        </div>
         <div class="bottom-bar">
             <div id="status">Recherche de vignette...</div>
-            <button id="finish-button">Terminer</button>
+            <button id="finish-button">Terminer la Session</button>
         </div>
     </div>
 
@@ -44,23 +63,27 @@
         const canvas = document.getElementById('canvas');
         const ctx = canvas.getContext('2d', { willReadFrequently: true });
         const viewfinder = document.getElementById('viewfinder');
+        const progressBar = document.getElementById('progress-bar');
         const counterDiv = document.getElementById('counter');
         const statusDiv = document.getElementById('status');
         const finishButton = document.getElementById('finish-button');
         const beep = document.getElementById('beep');
+        const sessionId = window.location.pathname.split('/').pop();
 
         let medicationCount = 0;
         let isProcessing = false;
+        let detectionStartTime = null;
+        const DETECTION_DELAY = 500; // 0.5 seconde de détection stable requise
 
         async function startCamera() {
             try {
                 const stream = await navigator.mediaDevices.getUserMedia({
-                    video: { facingMode: 'environment' }
+                    video: { facingMode: 'environment', width: { ideal: 1280 }, height: { ideal: 720 } }
                 });
                 video.srcObject = stream;
                 video.onloadedmetadata = () => requestAnimationFrame(analyzeFrame);
             } catch (err) {
-                statusDiv.textContent = 'Erreur d\'accès caméra';
+                statusDiv.textContent = 'Erreur: Caméra non accessible.';
             }
         }
 
@@ -70,42 +93,40 @@
                 return;
             }
 
-            canvas.width = video.videoWidth / 4;
-            canvas.height = video.videoHeight / 4;
+            const analysisWidth = 120;
+            canvas.width = analysisWidth;
+            canvas.height = video.videoHeight * (analysisWidth / video.videoWidth);
             ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
 
             const imageData = ctx.getImageData(0, 0, canvas.width, canvas.height);
             const data = imageData.data;
             let greenPixels = 0;
-            let bbox = { xMin: canvas.width, xMax: 0, yMin: canvas.height, yMax: 0 };
 
             for (let i = 0; i < data.length; i += 4) {
-                const index = i / 4;
-                const x = index % canvas.width;
-                const y = Math.floor(index / canvas.width);
-                const r = data[i];
-                const g = data[i + 1];
-                const b = data[i + 2];
-                if (g > r + 30 && g > b + 30 && g > 60 && g < 200 && r < 150 && b < 150) {
+                const r = data[i], g = data[i + 1], b = data[i + 2];
+                if (g > r + 20 && g > b + 20 && g > 60 && g < 200 && r < 150 && b < 150) {
                     greenPixels++;
-                    if (x < bbox.xMin) bbox.xMin = x;
-                    if (x > bbox.xMax) bbox.xMax = x;
-                    if (y < bbox.yMin) bbox.yMin = y;
-                    if (y > bbox.yMax) bbox.yMax = y;
                 }
             }
 
             const greenRatio = greenPixels / (data.length / 4);
-            const width = bbox.xMax - bbox.xMin;
-            const height = bbox.yMax - bbox.yMin;
-            const aspectRatio = width / height;
 
-            if (greenRatio > 0.05 && aspectRatio > 1.5 && aspectRatio < 4) {
+            if (greenRatio > 0.05) { // Seuil de détection du vert
+                if (detectionStartTime === null) {
+                    detectionStartTime = Date.now();
+                }
+                const elapsed = Date.now() - detectionStartTime;
                 viewfinder.classList.add('locked');
-                statusDiv.textContent = 'Vignette détectée - capture en cours...';
-                autoCapture();
+                progressBar.style.width = `${Math.min(100, (elapsed / DETECTION_DELAY) * 100)}%`;
+                statusDiv.textContent = 'Vignette détectée... Stabilisez.';
+
+                if (elapsed >= DETECTION_DELAY) {
+                    autoCapture();
+                }
             } else {
+                detectionStartTime = null;
                 viewfinder.classList.remove('locked');
+                progressBar.style.width = '0%';
                 statusDiv.textContent = 'Recherche de vignette...';
             }
 
@@ -113,48 +134,45 @@
         }
 
         function autoCapture() {
+            if (isProcessing) return;
             isProcessing = true;
             beep.play();
+            
             const snapCanvas = document.createElement('canvas');
-            const snapCtx = snapCanvas.getContext('2d');
             snapCanvas.width = video.videoWidth;
             snapCanvas.height = video.videoHeight;
-            snapCtx.drawImage(video, 0, 0);
+            snapCanvas.getContext('2d').drawImage(video, 0, 0);
 
             snapCanvas.toBlob(async (blob) => {
                 const formData = new FormData();
                 formData.append('file', blob, 'vignette.jpg');
                 try {
-                    const response = await fetch('/api/upload-by-session/auto', {
-                        method: 'POST',
-                        body: formData
-                    });
+                    const response = await fetch(`/api/upload-by-session/${sessionId}`, { method: 'POST', body: formData });
                     if (response.ok) {
                         medicationCount++;
                         counterDiv.textContent = `${medicationCount} médicament(s)`;
-                        statusDiv.textContent = '✅ Vignette capturée';
+                        statusDiv.textContent = '✅ Capturé ! Recherche du suivant...';
                     } else {
-                        throw new Error("Réponse serveur non valide");
+                        throw new Error("Erreur serveur");
                     }
                 } catch (e) {
-                    statusDiv.textContent = '❌ Erreur lors de l\'envoi';
+                    statusDiv.textContent = '❌ Erreur d\'envoi';
                 } finally {
-                    setTimeout(() => { isProcessing = false; }, 1500);
+                    setTimeout(() => { isProcessing = false; detectionStartTime = null; }, 2000); // Cooldown de 2s
                 }
             }, 'image/jpeg', 0.9);
         }
 
         finishButton.addEventListener('click', async () => {
             finishButton.disabled = true;
-            statusDiv.textContent = 'Finalisation en cours...';
+            statusDiv.textContent = 'Finalisation...';
             try {
-                const response = await fetch('/api/finish-session/auto', { method: 'POST' });
-                if (!response.ok) throw new Error('Erreur serveur');
+                await fetch(`/api/finish-session/${sessionId}`, { method: 'POST' });
                 statusDiv.textContent = 'Session terminée ✅';
                 statusDiv.style.color = '#28a745';
+                video.srcObject.getTracks().forEach(track => track.stop()); // Arrête la caméra
             } catch (err) {
                 statusDiv.textContent = 'Erreur lors de la finalisation';
-                statusDiv.style.color = 'red';
                 finishButton.disabled = false;
             }
         });
