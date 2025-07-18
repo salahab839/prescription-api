@@ -11,11 +11,13 @@
         #overlay { position: fixed; top: 0; left: 0; width: 100%; height: 100%; display: flex; flex-direction: column; justify-content: space-between; }
         .top-bar, .bottom-bar { background: rgba(0,0,0,0.5); padding: 15px; text-align: center; }
         .top-bar { border-bottom-left-radius: 12px; border-bottom-right-radius: 12px; }
+        .bottom-bar { border-top-left-radius: 12px; border-top-right-radius: 12px; position: relative; }
         h1 { margin: 0; font-size: 1.2rem; }
         #status { font-weight: bold; min-height: 20px; transition: color 0.3s; }
         #counter { font-size: 1.2rem; font-weight: bold; color: #007bff; }
         .viewfinder { position: absolute; top: 50%; left: 50%; width: 85vw; max-width: 500px; height: 40vh; max-height: 300px; border: 3px solid rgba(255,255,255,0.7); border-radius: 12px; transform: translate(-50%, -50%); box-shadow: 0 0 0 9999px rgba(0,0,0,0.5); pointer-events: none; transition: border-color 0.2s ease-in-out; }
         .viewfinder.locked { border-color: #39ff14; }
+        #finish-button { position: absolute; right: 20px; top: 50%; transform: translateY(-50%); padding: 10px 15px; background-color: #28a745; border: none; border-radius: 8px; font-size: 1rem; color: white; cursor: pointer; }
     </style>
 </head>
 <body>
@@ -32,6 +34,7 @@
         <div class="viewfinder" id="viewfinder"></div>
         <div class="bottom-bar">
             <div id="status">Recherche de vignette...</div>
+            <button id="finish-button">Terminer</button>
         </div>
     </div>
 
@@ -42,6 +45,7 @@
         const viewfinder = document.getElementById('viewfinder');
         const counterDiv = document.getElementById('counter');
         const statusDiv = document.getElementById('status');
+        const finishButton = document.getElementById('finish-button');
 
         let medicationCount = 0;
         let isProcessing = false;
@@ -114,8 +118,10 @@
                     if (response.ok) {
                         medicationCount++;
                         counterDiv.textContent = `${medicationCount} médicament(s)`;
+                        statusDiv.textContent = '✅ Vignette capturée';
+                    } else {
+                        throw new Error("Réponse serveur non valide");
                     }
-                    statusDiv.textContent = '✅ Vignette capturée';
                 } catch (e) {
                     statusDiv.textContent = '❌ Erreur lors de l\'envoi';
                 } finally {
@@ -123,6 +129,21 @@
                 }
             }, 'image/jpeg', 0.9);
         }
+
+        finishButton.addEventListener('click', async () => {
+            finishButton.disabled = true;
+            statusDiv.textContent = 'Finalisation en cours...';
+            try {
+                const response = await fetch('/api/finish-session/auto', { method: 'POST' });
+                if (!response.ok) throw new Error('Erreur serveur');
+                statusDiv.textContent = 'Session terminée ✅';
+                statusDiv.style.color = '#28a745';
+            } catch (err) {
+                statusDiv.textContent = 'Erreur lors de la finalisation';
+                statusDiv.style.color = 'red';
+                finishButton.disabled = false;
+            }
+        });
 
         startCamera();
     </script>
