@@ -1,207 +1,181 @@
-<!DOCTYPE html>
-<html lang="fr">
-<head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
-    <title>Scan Automatique</title>
-    <style>
-        :root {
-            --success-color: #28a745;
-            --danger-color: #dc3545;
-            --viewfinder-default: rgba(255, 255, 255, 0.7);
-            --viewfinder-locked: #39ff14;
-        }
-        body { margin: 0; background-color: #000; color: white; font-family: sans-serif; overflow: hidden; }
-        #camera-container { position: fixed; top: 0; left: 0; width: 100%; height: 100%; }
-        #video { width: 100%; height: 100%; object-fit: cover; }
-        #overlay { position: fixed; top: 0; left: 0; width: 100%; height: 100%; display: flex; flex-direction: column; justify-content: space-between; }
-        .top-bar, .bottom-bar { background: rgba(0,0,0,0.6); padding: 15px; text-align: center; backdrop-filter: blur(5px); }
-        h1 { margin: 0; font-size: 1.2rem; }
-        #status { font-weight: bold; min-height: 20px; transition: color 0.3s; }
-        #counter { font-size: 1.2rem; font-weight: bold; color: #007bff; }
-        .viewfinder {
-            position: absolute; top: 50%; left: 50%;
-            width: 85vw; max-width: 500px; height: 40vh; max-height: 300px;
-            border: 3px solid var(--viewfinder-default);
-            border-radius: 12px;
-            transform: translate(-50%, -50%);
-            box-shadow: 0 0 0 9999px rgba(0,0,0,0.5);
-            transition: border-color 0.3s ease-in-out;
-        }
-        .viewfinder.locked { border-color: var(--viewfinder-locked); }
-        #progress-bar {
-            position: absolute; bottom: 0; left: 0;
-            height: 5px; width: 0%;
-            background-color: var(--viewfinder-locked);
-            transition: width 0.5s linear;
-        }
-        #start-screen {
-            position: fixed; top: 0; left: 0; width: 100%; height: 100%;
-            background-color: #222;
-            display: flex; justify-content: center; align-items: center; z-index: 10;
-        }
-        #start-button {
-            padding: 20px 40px; font-size: 1.5rem; color: white;
-            background-color: #007bff; border: none; border-radius: 12px; cursor: pointer;
-        }
-    </style>
-</head>
-<body>
-    <div id="start-screen">
-        <button id="start-button">Démarrer le Scan</button>
-    </div>
+import os
+import traceback
+import json
+import re
+import pandas as pd
+import uuid
+import time
+import base64
+from flask import Flask, request, jsonify, render_template
+from flask_cors import CORS
+from google.cloud import vision
+from groq import Groq
+from thefuzz import process, fuzz
 
-    <div id="camera-container" style="visibility: hidden;">
-        <video id="video" playsinline autoplay muted></video>
-        <canvas id="canvas" style="display:none;"></canvas>
-        <audio id="beep" src="https://actions.google.com/sounds/v1/alarms/beep_short.ogg" preload="auto"></audio>
-    </div>
+# --- Setup ---
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+DB_PATH = os.path.join(BASE_DIR, "chifa_data.xlsx")
+app = Flask(__name__, template_folder='templates')
+CORS(app)
+SESSIONS = {}
 
-    <div id="overlay" style="visibility: hidden;">
-        <div class="top-bar">
-            <h1>Scan Automatique</h1>
-            <div id="counter">0 médicament(s)</div>
-        </div>
-        <div class="viewfinder" id="viewfinder">
-            <div id="progress-bar"></div>
-        </div>
-        <div class="bottom-bar">
-            <div id="status">Recherche de vignette...</div>
-            <!-- Le bouton Terminer a été retiré d'ici -->
-        </div>
-    </div>
+# --- Initialize Clients ---
+try:
+    vision_client = vision.ImageAnnotatorClient()
+    groq_client = Groq(api_key=os.environ.get("GROQ_API_KEY"))
+except Exception as e:
+    print(f"ERREUR CRITIQUE lors de l'initialisation des clients API: {e}")
 
-    <script>
-        const startScreen = document.getElementById('start-screen');
-        const startButton = document.getElementById('start-button');
-        const cameraContainer = document.getElementById('camera-container');
-        const overlay = document.getElementById('overlay');
-        const video = document.getElementById('video');
-        const canvas = document.getElementById('canvas');
-        const ctx = canvas.getContext('2d', { willReadFrequently: true });
-        const viewfinder = document.getElementById('viewfinder');
-        const progressBar = document.getElementById('progress-bar');
-        const counterDiv = document.getElementById('counter');
-        const statusDiv = document.getElementById('status');
-        const beep = document.getElementById('beep');
-        const sessionId = window.location.pathname.split('/').pop();
+# --- Helper Functions & DB Loading ---
+def normalize_string(s):
+    if not isinstance(s, str): return ""
+    s = s.lower().replace('bte', 'b').replace('boite', 'b').replace('comprimés', 'cp').replace('comprimé', 'cp').replace('grammes', 'g').replace('gramme', 'g').replace('milligrammes', 'mg')
+    s = re.sub(r'[^a-z0-9]', ' ', s); return re.sub(r'\s+', ' ', s).strip()
 
-        let medicationCount = 0;
-        let isProcessing = false;
-        let detectionStartTime = null;
-        const DETECTION_DELAY = 500;
+def build_reference_string(row, include_name=True, include_details=True):
+    name_part = row.get('Nom Commercial', '') if include_name else ''
+    dosage_part = row.get('Dosage', '') if include_details else ''
+    presentation_part = row.get('Présentation', '') if include_details else ''
+    return f"{name_part} {dosage_part} {presentation_part}".strip()
 
-        startButton.addEventListener('click', () => {
-            beep.play().catch(e => console.log("Interaction needed for audio"));
-            beep.pause();
-            beep.currentTime = 0;
-            startScreen.style.display = 'none';
-            cameraContainer.style.visibility = 'visible';
-            overlay.style.visibility = 'visible';
-            startCamera();
-        });
+DB_SIGNATURE_MAP = {}; DB_DOSAGE_PRES_MAP = {}; DB_NAMES_MAP = {}
+try:
+    df = pd.read_excel(DB_PATH) 
+    for index, row in df.iterrows():
+        row_dict = row.to_dict()
+        full_signature = normalize_string(build_reference_string(row)); DB_SIGNATURE_MAP[full_signature] = row_dict
+        dosage_pres_signature = normalize_string(build_reference_string(row, include_name=False))
+        if dosage_pres_signature not in DB_DOSAGE_PRES_MAP: DB_DOSAGE_PRES_MAP[dosage_pres_signature] = []
+        DB_DOSAGE_PRES_MAP[dosage_pres_signature].append(row_dict)
+        name_signature = normalize_string(build_reference_string(row, include_details=False))
+        if name_signature not in DB_NAMES_MAP: DB_NAMES_MAP[name_signature] = []
+        DB_NAMES_MAP[name_signature].append(row_dict)
+    print(f"Base de données chargée avec {len(DB_SIGNATURE_MAP)} médicaments.")
+except Exception as e:
+    print(f"ERREUR critique lors du chargement de la base de données : {e}")
 
-        async function startCamera() {
-            try {
-                const stream = await navigator.mediaDevices.getUserMedia({
-                    video: { facingMode: 'environment', width: { ideal: 1280 }, height: { ideal: 720 } }
-                });
-                video.srcObject = stream;
-                video.onloadedmetadata = () => requestAnimationFrame(analyzeFrame);
-            } catch (err) {
-                statusDiv.textContent = 'Erreur: Caméra non accessible.';
-            }
+# --- Intelligent PPA Parser ---
+def parse_ppa(text):
+    if not isinstance(text, str): return ""
+    if '=' in text:
+        text = text.split('=')[-1]
+    cleaned_text = re.sub(r'[^0-9,.]', '', text).strip()
+    return cleaned_text.replace(',', '.')
+
+# --- Image Processing Logic ---
+def process_image_data(image_content):
+    response = vision_client.text_detection(image=vision.Image(content=image_content))
+    if not response.text_annotations: raise Exception("Aucun texte détecté")
+    ocr_text = response.text_annotations[0].description
+    
+    system_prompt = """
+    Vous êtes un expert en lecture de vignettes de médicaments françaises. Votre unique tâche est de retourner un objet JSON valide.
+    Ne retournez que l'objet JSON, sans aucun texte supplémentaire, commentaire, ou formatage markdown.
+    Assurez-vous que toutes les valeurs sont des chaînes de caractères (strings) valides entre guillemets.
+    Exemple de format JSON valide :
+    { "nom": "DOLIPRANE", "dosage": "1000 MG", "conditionnement": "BTE/8", "ppa": "195.00" }
+    Utilisez les clés suivantes : "nom", "dosage", "conditionnement", "ppa".
+    """
+    chat_completion = groq_client.chat.completions.create(
+        messages=[{"role": "system", "content": system_prompt}, {"role": "user", "content": f"Texte à analyser:\n---\n{ocr_text}\n---"}],
+        model="llama3-8b-8192",
+        response_format={"type": "json_object"}
+    )
+    ai_data = json.loads(chat_completion.choices[0].message.content)
+    
+    ai_data['ppa'] = parse_ppa(ai_data.get('ppa', ''))
+
+    def get_verified_response(db_row, score, status="Vérifié"):
+        return {
+            "nom": db_row.get('Nom Commercial'), 
+            "dosage": db_row.get('Dosage'), 
+            "conditionnement": db_row.get('Présentation'), 
+            "ppa": ai_data.get('ppa'), 
+            "match_score": score, 
+            "status": status,
+            "posologie_qte_prise": "1",
+            "posologie_unite": db_row.get('Forme', ''), # Get 'Forme' from Excel
+            "posologie_frequence": "3",
+            "posologie_periode": "par jour"
         }
 
-        function analyzeFrame() {
-            if (isProcessing) {
-                requestAnimationFrame(analyzeFrame);
-                return;
-            }
+    ocr_full_sig = normalize_string(f"{ai_data.get('nom','')} {ai_data.get('dosage','')} {ai_data.get('conditionnement','')}")
+    ocr_name_sig = normalize_string(ai_data.get('nom',''))
+    ocr_details_sig = normalize_string(f"{ai_data.get('dosage','')} {ai_data.get('conditionnement','')}")
 
-            const analysisWidth = 120;
-            canvas.width = analysisWidth;
-            canvas.height = video.videoHeight * (analysisWidth / video.videoWidth);
-            ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
+    best_full_match, score_full = process.extractOne(ocr_full_sig, DB_SIGNATURE_MAP.keys(), scorer=fuzz.token_set_ratio)
+    if score_full >= 85: return get_verified_response(DB_SIGNATURE_MAP[best_full_match], score_full)
 
-            const imageData = ctx.getImageData(0, 0, canvas.width, canvas.height);
-            const data = imageData.data;
-            let greenPixels = 0;
+    best_name_match, score_name = process.extractOne(ocr_name_sig, DB_NAMES_MAP.keys(), scorer=fuzz.token_set_ratio)
+    if score_name >= 90:
+        candidate_drugs = DB_NAMES_MAP[best_name_match]
+        if len(candidate_drugs) == 1:
+            return get_verified_response(candidate_drugs[0], int((score_name * 0.8) + 20), status="Auto-Corrigé")
+        candidate_details = {normalize_string(build_reference_string(drug, include_name=False)): drug for drug in candidate_drugs}
+        best_candidate_details, score_candidate_details = process.extractOne(ocr_details_sig, candidate_details.keys(), scorer=fuzz.WRatio)
+        if score_candidate_details >= 75:
+            return get_verified_response(candidate_details[best_candidate_details], int((score_name * 0.6) + (score_candidate_details * 0.4)), status="Auto-Corrigé")
 
-            for (let i = 0; i < data.length; i += 4) {
-                const r = data[i], g = data[i + 1], b = data[i + 2];
-                if (g > r + 20 && g > b + 20 && g > 60 && g < 200 && r < 150 && b < 150) {
-                    greenPixels++;
-                }
-            }
+    best_details_match, score_details = process.extractOne(ocr_details_sig, DB_DOSAGE_PRES_MAP.keys(), scorer=fuzz.token_set_ratio)
+    if score_details >= 95:
+        candidate_drugs = DB_DOSAGE_PRES_MAP[best_details_match]
+        candidate_names = {normalize_string(build_reference_string(drug, include_details=False)): drug for drug in candidate_drugs}
+        best_candidate_name, score_candidate_name = process.extractOne(ocr_name_sig, candidate_names.keys())
+        if score_candidate_name >= 60:
+            return get_verified_response(candidate_names[best_candidate_name], int((score_details * 0.7) + (score_candidate_name * 0.3)), status="Auto-Corrigé")
 
-            const greenRatio = greenPixels / (data.length / 4);
+    return {"status": "Échec de la reconnaissance"}
 
-            if (greenRatio > 0.05) {
-                if (detectionStartTime === null) detectionStartTime = Date.now();
-                const elapsed = Date.now() - detectionStartTime;
-                viewfinder.classList.add('locked');
-                progressBar.style.width = `${Math.min(100, (elapsed / DETECTION_DELAY) * 100)}%`;
-                statusDiv.textContent = 'Vignette détectée... Stabilisez.';
+# --- API Routes ---
+@app.route('/api/create-session', methods=['POST'])
+def create_session():
+    session_id = str(uuid.uuid4()); SESSIONS[session_id] = {"status": "pending", "medications": [], "timestamp": time.time()}; return jsonify({"session_id": session_id})
 
-                if (elapsed >= DETECTION_DELAY) {
-                    autoCapture();
-                }
-            } else {
-                detectionStartTime = null;
-                viewfinder.classList.remove('locked');
-                progressBar.style.width = '0%';
-                statusDiv.textContent = 'Recherche de vignette...';
-            }
+@app.route('/phone-upload/<session_id>')
+def phone_upload_page(session_id):
+    return render_template('uploader.html') if session_id in SESSIONS else ("Session invalide.", 404)
 
-            requestAnimationFrame(analyzeFrame);
-        }
+@app.route('/api/upload-by-session/<session_id>', methods=['POST'])
+def upload_by_session(session_id):
+    if session_id not in SESSIONS or SESSIONS[session_id]['status'] != 'pending':
+        return jsonify({"error": "Session invalide ou terminée"}), 404
+    if 'file' not in request.files: return jsonify({"error": "Aucun fichier"}), 400
+    try:
+        image_content = request.files['file'].read()
+        processed_data = process_image_data(image_content)
+        if processed_data.get("status") != "Échec de la reconnaissance":
+            image_base64 = base64.b64encode(image_content).decode('utf-8')
+            SESSIONS[session_id]['medications'].append({"data": processed_data, "image_base64": image_base64})
+            return jsonify({"status": "success", "message": "Médicament ajouté."})
+        else:
+            return jsonify({"status": "failure", "message": "Vignette illisible"})
+    except Exception as e:
+        return jsonify({"error": f"Erreur de traitement: {e}"}), 500
 
-        function autoCapture() {
-            if (isProcessing) return;
-            isProcessing = true;
-            
-            const snapCanvas = document.createElement('canvas');
-            snapCanvas.width = video.videoWidth;
-            snapCanvas.height = video.videoHeight;
-            snapCanvas.getContext('2d').drawImage(video, 0, 0);
+@app.route('/api/finish-session/<session_id>', methods=['POST'])
+def finish_session(session_id):
+    if session_id in SESSIONS: SESSIONS[session_id]['status'] = 'finished'; return jsonify({"status": "success"})
+    return jsonify({"error": "Session invalide"}), 404
 
-            snapCanvas.toBlob(async (blob) => {
-                const formData = new FormData();
-                formData.append('file', blob, 'vignette.jpg');
-                try {
-                    const response = await fetch(`/api/upload-by-session/${sessionId}`, { method: 'POST', body: formData });
-                    const result = await response.json();
+@app.route('/api/check-session/<session_id>')
+def check_session(session_id):
+    if session_id not in SESSIONS: return jsonify({"status": "invalid"}), 404
+    session_info = SESSIONS[session_id]
+    if time.time() - session_info.get("timestamp", 0) > 600:
+        if session_id in SESSIONS: del SESSIONS[session_id]
+        return jsonify({"status": "expired"}), 410
+    return jsonify({"status": session_info['status'], "medications": session_info['medications']})
 
-                    if (response.ok && result.status === 'success') {
-                        beep.play();
-                        medicationCount++;
-                        counterDiv.textContent = `${medicationCount} médicament(s)`;
-                        statusDiv.textContent = '✅ Capturé ! Recherche du suivant...';
-                        statusDiv.style.color = 'var(--success-color)';
-                    } else {
-                        throw new Error(result.message || "Vignette illisible");
-                    }
-                } catch (e) {
-                    statusDiv.textContent = `❌ ${e.message}`;
-                    statusDiv.style.color = 'var(--danger-color)';
-                } finally {
-                    setTimeout(() => { 
-                        isProcessing = false; 
-                        detectionStartTime = null;
-                        statusDiv.style.color = 'white';
-                    }, 2000);
-                }
-            }, 'image/jpeg', 0.9);
-        }
+@app.route('/process_vignette', methods=['POST'])
+def process_vignette_endpoint():
+    if 'file' not in request.files: return jsonify({"error": "No file part"}), 400
+    try:
+        image_content = request.files['file'].read()
+        processed_data = process_image_data(image_content)
+        image_base64 = base64.b64encode(image_content).decode('utf-8')
+        return jsonify({"data": processed_data, "image_base64": image_base64})
+    except Exception as e:
+        return jsonify({"error": f"Une erreur interne est survenue: {e}"}), 500
 
-        // Notifier le serveur quand l'utilisateur quitte la page
-        window.addEventListener('beforeunload', () => {
-            if (sessionId) {
-                // Utilise sendBeacon pour un envoi plus fiable en arrière-plan
-                navigator.sendBeacon(`/api/finish-session/${sessionId}`, new Blob());
-            }
-        });
-    </script>
-</body>
-</html>
+if __name__ == '__main__':
+    app.run(host='0.0.0.0', port=int(os.environ.get('PORT', 8080)))
