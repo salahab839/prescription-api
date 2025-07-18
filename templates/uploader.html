@@ -5,40 +5,53 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
     <title>Scanner de Session</title>
     <style>
-        body { margin: 0; background-color: #000; color: white; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; }
-        #video-container { position: fixed; top: 0; left: 0; width: 100%; height: 100%; display: flex; justify-content: center; align-items: center; }
+        :root {
+            --primary-color: #007bff;
+            --success-color: #28a745;
+            --danger-color: #dc3545;
+        }
+        body { margin: 0; background-color: #111; color: white; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; overflow: hidden; }
+        #camera-container { position: fixed; top: 0; left: 0; width: 100%; height: 100%; }
         #video { width: 100%; height: 100%; object-fit: cover; }
-        #overlay { position: fixed; top: 0; left: 0; width: 100%; height: 100%; display: flex; flex-direction: column; justify-content: space-between; align-items: center; background: rgba(0,0,0,0.2); cursor: pointer; }
-        .overlay-text { background: rgba(0,0,0,0.5); padding: 10px 20px; border-radius: 10px; margin: 20px; text-align: center; }
-        #status { font-weight: bold; font-size: 1.1rem; min-height: 24px; }
-        #counter { font-size: 1.5rem; font-weight: bold; }
-        .spinner { border: 4px solid #f3f3f3; border-top: 4px solid #fff; border-radius: 50%; width: 40px; height: 40px; animation: spin 1s linear infinite; display: none; }
+        #overlay { position: fixed; top: 0; left: 0; width: 100%; height: 100%; display: flex; flex-direction: column; justify-content: space-between; }
+        .top-bar, .bottom-bar { background: rgba(0,0,0,0.5); padding: 15px; text-align: center; }
+        .top-bar { border-bottom-left-radius: 12px; border-bottom-right-radius: 12px; }
+        .bottom-bar { border-top-left-radius: 12px; border-top-right-radius: 12px; }
+        h1 { margin: 0; font-size: 1.2rem; }
+        #status { font-weight: bold; min-height: 20px; transition: color 0.3s; }
+        #counter { font-size: 1.2rem; font-weight: bold; color: var(--primary-color); }
+        .shutter-container { display: flex; justify-content: center; align-items: center; padding: 10px 0; }
+        #shutter-button { width: 70px; height: 70px; border-radius: 50%; background-color: white; border: 4px solid rgba(255,255,255,0.5); cursor: pointer; transition: transform 0.1s; }
+        #shutter-button:active { transform: scale(0.9); }
+        #finish-button { position: absolute; right: 20px; top: 50%; transform: translateY(-50%); padding: 10px 15px; background-color: var(--success-color); border: none; border-radius: 8px; font-size: 1rem; color: white; cursor: pointer; }
+        .spinner { border: 4px solid #888; border-top: 4px solid #fff; border-radius: 50%; width: 30px; height: 30px; animation: spin 1s linear infinite; margin: 10px auto; display: none; }
         @keyframes spin { 0% { transform: rotate(0deg); } 100% { transform: rotate(360deg); } }
         .flash { position: fixed; top: 0; left: 0; width: 100%; height: 100%; background-color: white; opacity: 0; pointer-events: none; transition: opacity 0.5s; }
         .flash.active { opacity: 0.8; }
-        .viewfinder { position: absolute; top: 50%; left: 50%; width: 85vw; max-width: 500px; height: 40vh; max-height: 300px; border: 2px solid rgba(255, 255, 255, 0.7); border-radius: 10px; transform: translate(-50%, -50%); box-shadow: 0 0 0 9999px rgba(0,0,0,0.5); }
-        #finish-button { padding: 10px 20px; background-color: #28a745; border: none; border-radius: 8px; font-size: 16px; font-weight: bold; color: white; cursor: pointer; }
+        .viewfinder { position: absolute; top: 50%; left: 50%; width: 85vw; max-width: 500px; height: 40vh; max-height: 300px; border: 2px solid rgba(255, 255, 255, 0.7); border-radius: 10px; transform: translate(-50%, -50%); box-shadow: 0 0 0 9999px rgba(0,0,0,0.4); pointer-events: none; }
     </style>
 </head>
 <body>
-    <div id="video-container">
+    <div id="camera-container">
         <video id="video" playsinline autoplay muted></video>
         <canvas id="canvas" style="display:none;"></canvas>
     </div>
 
     <div id="overlay">
-        <div class="overlay-text">
+        <div class="top-bar">
             <h1>Session de Scan</h1>
-            <p>Cadrez la vignette et tapez sur l'écran pour la capturer.</p>
+            <div id="counter">0 médicament(s)</div>
         </div>
         
         <div class="viewfinder"></div>
 
-        <div class="overlay-text">
-            <div id="counter">0 médicament(s)</div>
-            <div id="status"></div>
+        <div class="bottom-bar">
+            <div id="status">Cadrez la vignette et appuyez sur le bouton.</div>
             <div class="spinner" id="spinner"></div>
-            <button id="finish-button">Terminer</button>
+            <div class="shutter-container">
+                <div id="shutter-button"></div>
+                <button id="finish-button">Terminer</button>
+            </div>
         </div>
     </div>
     
@@ -47,11 +60,11 @@
     <script>
         const video = document.getElementById('video');
         const canvas = document.getElementById('canvas');
-        const overlay = document.getElementById('overlay');
         const statusDiv = document.getElementById('status');
         const spinner = document.getElementById('spinner');
         const counterDiv = document.getElementById('counter');
         const flashEffect = document.getElementById('flash');
+        const shutterButton = document.getElementById('shutter-button');
         const finishButton = document.getElementById('finish-button');
         
         let medicationCount = 0;
@@ -61,35 +74,48 @@
         async function startCamera() {
             try {
                 const stream = await navigator.mediaDevices.getUserMedia({
-                    video: { facingMode: 'environment' } // Use the back camera
+                    video: { 
+                        facingMode: 'environment',
+                        // Ask for higher resolution for better OCR
+                        width: { ideal: 1920 },
+                        height: { ideal: 1080 }
+                    }
                 });
                 video.srcObject = stream;
+                // Add tap-to-focus capabilities
+                const [videoTrack] = stream.getVideoTracks();
+                if (videoTrack.getCapabilities().focusMode?.includes('continuous')) {
+                    video.addEventListener('click', event => {
+                        if (event.target !== shutterButton && event.target !== finishButton) {
+                            videoTrack.applyConstraints({ advanced: [{ focusMode: 'continuous' }] });
+                        }
+                    });
+                }
             } catch (err) {
-                statusDiv.textContent = 'Erreur: Impossible d\'accéder à la caméra.';
+                statusDiv.textContent = 'Erreur: Caméra non accessible.';
                 console.error("Error accessing camera: ", err);
             }
         }
 
-        overlay.addEventListener('click', (event) => {
-            // Prevent capture if the finish button was clicked
-            if (event.target === finishButton) return;
+        shutterButton.addEventListener('click', () => {
             if (isProcessing) return;
             captureAndUpload();
         });
 
         finishButton.addEventListener('click', async () => {
             if (isProcessing) return;
-            isProcessing = true; // Prevent other actions
-            statusDiv.textContent = 'Finalisation de la session...';
+            isProcessing = true;
+            statusDiv.textContent = 'Finalisation...';
             spinner.style.display = 'block';
             try {
                 await fetch(`/api/finish-session/${sessionId}`, { method: 'POST' });
                 statusDiv.textContent = 'Session terminée. Vous pouvez fermer cette page.';
-                statusDiv.style.color = 'green';
-                overlay.style.pointerEvents = 'none'; // Disable further clicks
+                statusDiv.style.color = 'var(--success-color)';
+                shutterButton.style.display = 'none';
+                finishButton.style.display = 'none';
             } catch (error) {
                 statusDiv.textContent = 'Erreur lors de la finalisation.';
-                statusDiv.style.color = 'red';
+                statusDiv.style.color = 'var(--danger-color)';
                 isProcessing = false;
             }
         });
@@ -125,18 +151,22 @@
                     medicationCount++;
                     counterDiv.textContent = `${medicationCount} médicament(s)`;
                     statusDiv.textContent = '✅ Succès ! Prêt pour le suivant.';
-                    statusDiv.style.color = 'green';
+                    statusDiv.style.color = 'var(--success-color)';
 
                 } catch (error) {
                     statusDiv.textContent = `❌ Erreur: ${error.message}`;
-                    statusDiv.style.color = 'red';
+                    statusDiv.style.color = 'var(--danger-color)';
                 } finally {
                     setTimeout(() => {
                         isProcessing = false;
                         spinner.style.display = 'none';
-                    }, 500); // Add a small delay
+                        if (!statusDiv.textContent.startsWith('❌')) {
+                           statusDiv.textContent = 'Cadrez la vignette et appuyez sur le bouton.';
+                           statusDiv.style.color = 'white';
+                        }
+                    }, 1500); 
                 }
-            }, 'image/jpeg');
+            }, 'image/jpeg', 0.9); // Use high quality JPEG
         }
 
         startCamera();
