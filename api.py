@@ -74,7 +74,14 @@ def process_image_data(image_content):
     )
     ai_data = json.loads(chat_completion.choices[0].message.content)
     
-    ppa_raw = str(ai_data.get('ppa', '')); ppa_cleaned = re.sub(r'[^0-9.,]', '', ppa_raw); ai_data['ppa'] = ppa_cleaned.replace('.', ',')
+    # --- CORRECTED PPA FORMATTING ---
+    ppa_raw = str(ai_data.get('ppa', ''))
+    # Keep only digits, period, and comma
+    ppa_numeric_str = re.sub(r'[^0-9.,]', '', ppa_raw)
+    # Replace comma with period for CHIFA compatibility
+    ppa_formatted = ppa_numeric_str.replace(',', '.')
+    ai_data['ppa'] = ppa_formatted
+    # --- END OF FIX ---
 
     def get_verified_response(db_row, score, status="Vérifié"):
         return {"nom": db_row.get('Nom Commercial'), "dosage": db_row.get('Dosage'), "conditionnement": db_row.get('Présentation'), "ppa": ai_data.get('ppa'), "match_score": score, "status": status}
