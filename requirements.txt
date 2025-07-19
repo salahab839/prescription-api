@@ -6,3 +6,10 @@ groq
 pandas
 openpyxl
 thefuzz
+# Added for the modern UI theme
+sv-ttk
+# Required for automation and QR codes
+pyautogui
+pywinauto
+pyperclip
+qrcode[pil]
