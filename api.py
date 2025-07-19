@@ -1,3 +1,4 @@
+# api.py
 import os
 import traceback
 import json
@@ -47,7 +48,6 @@ def extract_numeric_dosage(dosage_str):
     return None
 
 def extract_numbers_from_string(s):
-    """Extracts all integer numbers from a string and returns them as a list."""
     if not isinstance(s, str): return []
     return [int(num) for num in re.findall(r'\d+', s)]
 
@@ -60,7 +60,6 @@ def build_reference_string(row, include_name=True, include_details=True):
     return " ".join(filter(None, parts)).strip()
 
 def parse_ppa(text):
-    """Extracts and cleans the PPA value from text."""
     if not isinstance(text, str): return ""
     if '=' in text: text = text.split('=')[-1]
     elif ':' in text: text = text.split(':')[-1]
@@ -71,21 +70,17 @@ def parse_ppa(text):
 DB_NAMES_MAP = {}
 df = None
 try:
-    # Try reading as Excel first, then fallback to CSV.
     try:
         df = pd.read_excel(DB_PATH).astype(str).fillna('')
     except Exception:
         df = pd.read_csv(DB_PATH).astype(str).fillna('')
-        
     df['DosageNumeric'] = df['Dosage'].apply(extract_numeric_dosage)
-
     for index, row in df.iterrows():
         row_dict = row.to_dict()
         name_signature = normalize_string(build_reference_string(row, include_details=False))
         if name_signature not in DB_NAMES_MAP:
             DB_NAMES_MAP[name_signature] = []
         DB_NAMES_MAP[name_signature].append(row_dict)
-            
     print(f"Database loaded successfully with {len(df)} medications.")
 except FileNotFoundError:
     print(f"CRITICAL ERROR: Database file not found at {DB_PATH}")
@@ -97,8 +92,6 @@ except Exception as e:
 def process_image_data(image_content):
     if not all([vision_client, groq_client, df is not None]):
         return {"status": "Échec: Service non initialisé"}
-
-    # 1. OCR
     try:
         response = vision_client.text_detection(image=vision.Image(content=image_content))
         if not response.text_annotations:
@@ -106,8 +99,6 @@ def process_image_data(image_content):
         ocr_text = response.text_annotations[0].description
     except Exception as e:
         return {"status": "Échec OCR", "details": str(e)}
-
-    # 2. AI Extraction
     try:
         system_prompt = """
         You are an expert at reading French medication labels. Your task is to extract information into a valid JSON object.
@@ -125,54 +116,37 @@ def process_image_data(image_content):
     except Exception as e:
         return {"status": "Échec de l'analyse IA", "details": str(e)}
 
-    # --- START: MODIFIED RESPONSE FORMATTING FUNCTION ---
     def get_response(db_row, score, status="Vérifié"):
-        # Prioritize PPA from the vignette (AI) as it's the most current.
         ppa_value = ai_data.get('ppa')
-
-        # If AI fails to find PPA on the vignette, fall back to the database PPA.
-        # Assuming the column in your Excel/CSV file is named 'PPA'.
         if not ppa_value:
             ppa_value = parse_ppa(db_row.get('PPA', ''))
-
-        # If PPA is still missing from both, default to "0.00" to avoid errors.
         if not ppa_value:
             ppa_value = "0.00"
-
         return {
             "nom": db_row.get('Nom Commercial'), "dci": db_row.get('DCI'),
             "dosage": db_row.get('Dosage'), "conditionnement": db_row.get('Présentation'),
-            "ppa": ppa_value, # This value is now guaranteed to be non-empty
+            "ppa": ppa_value,
             "match_score": score, "status": status,
-            "posologie_qte_prise": "1", "posologie_unite": db_row.get('Forme', ''),
-            "posologie_frequence": "3", "posologie_periode": "par jour"
+            "posologie_qte_prise": "",
+            "posologie_unite": db_row.get('Forme', ''),
+            "posologie_frequence": "",
+            "posologie_periode": ""
         }
-    # --- END: MODIFIED RESPONSE FORMATTING FUNCTION ---
 
-    # 4. Matching Logic
     ocr_name_sig = normalize_string(ai_data.get('nom',''))
     ocr_numeric_dosage = extract_numeric_dosage(ai_data.get('dosage'))
-    
     if not ocr_name_sig:
         return {"status": "Échec", "details": "Nom du médicament non trouvé par l'IA."}
-
     best_name_match, score_name = process.extractOne(ocr_name_sig, DB_NAMES_MAP.keys(), scorer=fuzz.token_set_ratio)
-    
     if score_name < 80:
         return {"status": "Échec de la reconnaissance", "details": f"Nom non correspondant (Score: {score_name})."}
-
     candidate_drugs = DB_NAMES_MAP[best_name_match]
-    
     if ocr_numeric_dosage is not None:
         exact_dosage_matches = [d for d in candidate_drugs if d.get('DosageNumeric') == ocr_numeric_dosage]
-        
         if len(exact_dosage_matches) == 1:
             return get_response(exact_dosage_matches[0], 100, status="Vérifié (Dosage Exact)")
-        
         if len(exact_dosage_matches) > 1:
             ocr_presentation_str = ai_data.get('conditionnement', '')
-            
-            # STRATEGY 1: Match by numbers in the presentation (e.g., 14 in "B/14"). This is very reliable.
             ocr_numbers = extract_numbers_from_string(ocr_presentation_str)
             if ocr_numbers:
                 possible_matches = []
@@ -182,40 +156,24 @@ def process_image_data(image_content):
                         possible_matches.append(drug)
                 if len(possible_matches) == 1:
                     return get_response(possible_matches[0], 100, status="Vérifié (N° de conditionnement)")
-
-            # STRATEGY 2: Fuzzy match on the presentation text (e.g., "cp" vs "inj"). Good fallback.
             ocr_presentation_sig = normalize_string(ocr_presentation_str)
             if ocr_presentation_sig:
-                candidate_presentations_map = {
-                    normalize_string(d.get('Présentation', '')): d 
-                    for d in exact_dosage_matches
-                }
-                best_match, score = process.extractOne(
-                    ocr_presentation_sig, 
-                    candidate_presentations_map.keys(), 
-                    scorer=fuzz.partial_token_set_ratio
-                )
+                candidate_presentations_map = {normalize_string(d.get('Présentation', '')): d for d in exact_dosage_matches}
+                best_match, score = process.extractOne(ocr_presentation_sig, candidate_presentations_map.keys(), scorer=fuzz.partial_token_set_ratio)
                 if score >= 85:
                     return get_response(candidate_presentations_map[best_match], score, status="Vérifié (Forme Exacte)")
-
-    # Fallback to original broader details matching if the above logic didn't return a result
     ocr_details_sig = normalize_string(f"{ai_data.get('dosage','')} {ai_data.get('conditionnement','')}")
     list_to_search = exact_dosage_matches if 'exact_dosage_matches' in locals() and exact_dosage_matches else candidate_drugs
     candidate_details_map = {normalize_string(build_reference_string(d, include_name=False)): d for d in list_to_search}
-    
     if not candidate_details_map:
         return {"status": "Échec de la reconnaissance", "details": "Aucun candidat à la comparaison trouvé."}
-
     best_details_match, score_details = process.extractOne(ocr_details_sig, candidate_details_map.keys(), scorer=fuzz.WRatio)
-    
     if score_details >= 75:
         final_score = int((score_name * 0.6) + (score_details * 0.4))
         return get_response(candidate_details_map[best_details_match], final_score, status="Auto-Corrigé")
-
     return {"status": "Échec de la reconnaissance", "details": "Aucune correspondance fiable trouvée."}
 
-
-# --- API Routes (unchanged) ---
+# --- API Routes ---
 @app.route('/api/create-session', methods=['POST'])
 def create_session():
     session_id = str(uuid.uuid4())
