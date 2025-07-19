@@ -14,7 +14,6 @@ from thefuzz import process, fuzz
 
 # --- Setup ---
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-# RESTORED: Reading the .xlsx file directly, as in the original code.
 DB_PATH = os.path.join(BASE_DIR, "chifa_data.xlsx")
 
 app = Flask(__name__, template_folder='templates')
@@ -37,8 +36,17 @@ def normalize_string(s):
     replacements = {'bte': 'b', 'boite': 'b', 'comprimés': 'cp', 'comprimé': 'cp', 'grammes': 'g', 'gramme': 'g', 'milligrammes': 'mg'}
     for old, new in replacements.items():
         s = s.replace(old, new)
-    s = re.sub(r'[^a-z0-9]', ' ', s)
+    s = re.sub(r'[^a-z0-9. ]', ' ', s) # Allow dots for dosages like 1.5
     return re.sub(r'\s+', ' ', s).strip()
+
+def extract_numeric_dosage(dosage_str):
+    """Extracts only the number from a dosage string for precise matching."""
+    if not isinstance(dosage_str, str): return None
+    # Find all numbers (including decimals) in the string
+    numbers = re.findall(r'(\d+\.?\d*)', dosage_str)
+    if numbers:
+        return float(numbers[0])
+    return None
 
 def build_reference_string(row, include_name=True, include_details=True):
     """Builds a standardized string from a database row for matching."""
@@ -56,12 +64,13 @@ DB_DOSAGE_PRES_MAP = {}
 DB_NAMES_MAP = {}
 df = None
 try:
-    # RESTORED: Using pd.read_excel to correctly handle the .xlsx file.
     df = pd.read_excel(DB_PATH).astype(str).fillna('')
     
+    # Add a numeric dosage column to the DataFrame for precise matching
+    df['DosageNumeric'] = df['Dosage'].apply(extract_numeric_dosage)
+
     for index, row in df.iterrows():
         row_dict = row.to_dict()
-        # RESTORED: Rebuilding all three original maps for multi-tiered matching.
         full_signature = normalize_string(build_reference_string(row))
         DB_SIGNATURE_MAP[full_signature] = row_dict
 
@@ -82,7 +91,7 @@ except Exception as e:
     print(f"CRITICAL ERROR loading database: {e}")
     traceback.print_exc()
 
-# --- Image Processing Logic (Restored & Enhanced) ---
+# --- Image Processing Logic (With Precise Dosage Matching) ---
 def process_image_data(image_content):
     if not all([vision_client, groq_client, df is not None]):
         return {"status": "Échec: Service non initialisé"}
@@ -95,10 +104,9 @@ def process_image_data(image_content):
         ocr_text = response.text_annotations[0].description
         print(f"--- OCR Text ---\n{ocr_text}\n-----------------")
     except Exception as e:
-        print(f"Google Vision API Error: {e}")
         return {"status": "Échec OCR", "details": str(e)}
 
-    # 2. AI Extraction (Simplified Prompt)
+    # 2. AI Extraction
     try:
         system_prompt = """
         You are an expert at reading French medication labels (vignettes). Your task is to extract information into a valid JSON object.
@@ -113,7 +121,6 @@ def process_image_data(image_content):
         ai_data = json.loads(chat_completion.choices[0].message.content)
         print(f"--- AI Data ---\n{ai_data}\n---------------")
     except Exception as e:
-        print(f"Groq AI extraction failed: {e}. This scan will likely fail.")
         return {"status": "Échec de l'analyse IA", "details": str(e)}
 
     # 3. Response Formatting
@@ -127,42 +134,54 @@ def process_image_data(image_content):
             "posologie_frequence": "3", "posologie_periode": "par jour"
         }
 
-    # 4. Restored Multi-Tiered Matching Logic
-    ocr_full_sig = normalize_string(f"{ai_data.get('nom','')} {ai_data.get('dosage','')} {ai_data.get('conditionnement','')}")
+    # 4. New Matching Logic: Name -> Exact Dosage -> Fuzzy Details
     ocr_name_sig = normalize_string(ai_data.get('nom',''))
-    ocr_details_sig = normalize_string(f"{ai_data.get('dosage','')} {ai_data.get('conditionnement','')}")
+    ocr_numeric_dosage = extract_numeric_dosage(ai_data.get('dosage'))
+    
+    if not ocr_name_sig:
+        return {"status": "Échec", "details": "Nom du médicament non trouvé par l'IA."}
 
-    # Tier 1: High-confidence full signature match
-    best_full_match, score_full = process.extractOne(ocr_full_sig, DB_SIGNATURE_MAP.keys(), scorer=fuzz.token_set_ratio)
-    if score_full >= 85:
-        print(f"Match found on Tier 1 (Full Signature): '{best_full_match}' with score {score_full}")
-        return get_response(DB_SIGNATURE_MAP[best_full_match], score_full)
-
-    # Tier 2: High-confidence name match, then disambiguate details
+    # Step 1: Find the best matching name
     best_name_match, score_name = process.extractOne(ocr_name_sig, DB_NAMES_MAP.keys(), scorer=fuzz.token_set_ratio)
-    if score_name >= 90:
-        candidate_drugs = DB_NAMES_MAP[best_name_match]
-        if len(candidate_drugs) == 1:
-            print(f"Match found on Tier 2 (Unique Name): '{best_name_match}' with score {score_name}")
-            return get_response(candidate_drugs[0], int((score_name * 0.8) + 20), status="Auto-Corrigé")
-        
-        candidate_details_map = {normalize_string(build_reference_string(drug, include_name=False)): drug for drug in candidate_drugs}
-        best_candidate_details, score_candidate_details = process.extractOne(ocr_details_sig, candidate_details_map.keys(), scorer=fuzz.WRatio)
-        if score_candidate_details >= 75:
-            print(f"Match found on Tier 2 (Name + Details): '{best_name_match}' + '{best_candidate_details}'")
-            final_score = int((score_name * 0.6) + (score_candidate_details * 0.4))
-            return get_response(candidate_details_map[best_candidate_details], final_score, status="Auto-Corrigé")
+    
+    print(f"Name match: '{best_name_match}' with score {score_name}")
+    
+    if score_name < 80: # Slightly more lenient on name if dosage is a good match
+        return {"status": "Échec de la reconnaissance", "details": f"Aucun nom de médicament correspondant trouvé (Score: {score_name})."}
 
-    # Tier 3: High-confidence details match, then guess name
-    best_details_match, score_details = process.extractOne(ocr_details_sig, DB_DOSAGE_PRES_MAP.keys(), scorer=fuzz.token_set_ratio)
-    if score_details >= 95:
-        candidate_drugs = DB_DOSAGE_PRES_MAP[best_details_match]
-        candidate_names_map = {normalize_string(build_reference_string(drug, include_details=False)): drug for drug in candidate_drugs}
-        best_candidate_name, score_candidate_name = process.extractOne(ocr_name_sig, candidate_names_map.keys())
-        if score_candidate_name >= 60:
-            print(f"Match found on Tier 3 (Details + Name): '{best_details_match}' + '{best_candidate_name}'")
-            final_score = int((score_details * 0.7) + (score_candidate_name * 0.3))
-            return get_response(candidate_names_map[best_candidate_name], final_score, status="Auto-Corrigé")
+    # Step 2: Filter candidates by the best name match
+    candidate_drugs = DB_NAMES_MAP[best_name_match]
+    
+    # Step 3: Find an exact numeric dosage match among candidates
+    if ocr_numeric_dosage is not None:
+        exact_dosage_matches = []
+        for drug in candidate_drugs:
+            if drug.get('DosageNumeric') == ocr_numeric_dosage:
+                exact_dosage_matches.append(drug)
+        
+        if len(exact_dosage_matches) == 1:
+            print(f"Match found on Tier 1 (Name + Exact Dosage): '{best_name_match}' with dosage {ocr_numeric_dosage}")
+            return get_response(exact_dosage_matches[0], 100, status="Vérifié (Dosage Exact)")
+        
+        # If multiple drugs have the same name and dosage, use presentation to break the tie
+        if len(exact_dosage_matches) > 1:
+            print(f"Multiple exact dosage matches found. Disambiguating with presentation...")
+            ocr_details_sig = normalize_string(f"{ai_data.get('dosage','')} {ai_data.get('conditionnement','')}")
+            candidate_details_map = {normalize_string(build_reference_string(drug, include_name=False)): drug for drug in exact_dosage_matches}
+            best_details_match, score_details = process.extractOne(ocr_details_sig, candidate_details_map.keys(), scorer=fuzz.WRatio)
+            if score_details >= 75:
+                print(f"Match found on Tier 2 (Name + Exact Dosage + Presentation): '{best_name_match}' + '{best_details_match}'")
+                return get_response(candidate_details_map[best_details_match], 99, status="Auto-Corrigé")
+
+    # Fallback to original fuzzy matching if exact dosage fails
+    print("Exact dosage match failed. Falling back to fuzzy details matching.")
+    ocr_details_sig = normalize_string(f"{ai_data.get('dosage','')} {ai_data.get('conditionnement','')}")
+    candidate_details_map = {normalize_string(build_reference_string(drug, include_name=False)): drug for drug in candidate_drugs}
+    best_details_match, score_details = process.extractOne(ocr_details_sig, candidate_details_map.keys(), scorer=fuzz.WRatio)
+    if score_details >= 75:
+        print(f"Match found on Tier 3 (Name + Fuzzy Details): '{best_name_match}' + '{best_details_match}'")
+        final_score = int((score_name * 0.6) + (score_details * 0.4))
+        return get_response(candidate_details_map[best_details_match], final_score, status="Auto-Corrigé")
 
     # If all tiers fail
     print("All matching tiers failed.")
