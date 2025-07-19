@@ -14,8 +14,8 @@ from thefuzz import process, fuzz
 
 # --- Setup ---
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-DB_MAIN_PATH = os.path.join(BASE_DIR, "chifa_data.xlsx - Sheet1.csv")
-DB_TARIF_PATH = os.path.join(BASE_DIR, "chifa_data 12121.xlsx - Sheet1.csv")
+# Reverting to a single, primary database file.
+DB_PATH = os.path.join(BASE_DIR, "chifa_data.xlsx - Sheet1.csv")
 
 app = Flask(__name__, template_folder='templates')
 CORS(app)
@@ -40,65 +40,38 @@ def normalize_string(s):
     s = re.sub(r'[^a-z0-9]', ' ', s)
     return re.sub(r'\s+', ' ', s).strip()
 
-def build_reference_string(row, include_name=True, include_dci=True, include_details=True):
-    parts = []
-    if include_name: parts.append(row.get('Nom Commercial', ''))
-    if include_dci: parts.append(row.get('DCI', ''))
-    if include_details:
-        parts.append(row.get('Dosage', ''))
-        parts.append(row.get('Présentation', ''))
+def build_details_string(row):
+    """Builds a string containing dosage and presentation for matching."""
+    parts = [row.get('Dosage', ''), row.get('Présentation', '')]
     return " ".join(filter(None, parts)).strip()
 
-def parse_price(text):
-    if not isinstance(text, str): return ""
-    if '=' in text: text = text.split('=')[-1]
-    elif ':' in text: text = text.split(':')[-1]
-    cleaned_text = re.sub(r'[^0-9,.]', '', text).strip().replace(',', '.')
-    try:
-        return f"{float(cleaned_text):.2f}"
-    except (ValueError, TypeError):
-        return ""
-
-# --- Database Loading and Merging ---
+# --- Database Loading ---
 DB_NAMES_MAP = {}
-DB_TARIF_MAP = {}
-DB_ALL_NAMES = [] # For raw text fallback
-df_merged = None
+df = None
 try:
-    df_main = pd.read_csv(DB_MAIN_PATH).astype(str).fillna('')
-    df_tarif_source = pd.read_csv(DB_TARIF_PATH).astype(str).fillna('')
-    if 'Tarif' not in df_tarif_source.columns and 'PPA' in df_tarif_source.columns:
-        df_tarif_source = df_tarif_source.rename(columns={'PPA': 'Tarif'})
+    df = pd.read_csv(DB_PATH).astype(str).fillna('')
     
-    merge_keys = ['Nom Commercial', 'Dosage', 'Présentation']
-    df_merged = pd.merge(df_main, df_tarif_source[['Tarif'] + merge_keys], on=merge_keys, how='left')
-    
-    for index, row in df_merged.iterrows():
+    for index, row in df.iterrows():
         row_dict = row.to_dict()
         name_signature = normalize_string(row_dict.get('Nom Commercial', ''))
         if name_signature:
             if name_signature not in DB_NAMES_MAP:
                 DB_NAMES_MAP[name_signature] = []
-                DB_ALL_NAMES.append(name_signature) # Add unique normalized names for fallback search
             DB_NAMES_MAP[name_signature].append(row_dict)
-        
-        tarif_str = parse_price(row_dict.get('Tarif', ''))
-        if tarif_str:
-            if tarif_str not in DB_TARIF_MAP: DB_TARIF_MAP[tarif_str] = []
-            DB_TARIF_MAP[tarif_str].append(row_dict)
-
-    print(f"Database ready. {len(DB_TARIF_MAP)} unique tariffs, {len(DB_ALL_NAMES)} unique names.")
-
+            
+    print(f"Database loaded successfully with {len(df)} medications.")
+except FileNotFoundError:
+    print(f"CRITICAL ERROR: Database file not found at {DB_PATH}")
 except Exception as e:
-    print(f"CRITICAL ERROR loading/merging databases: {e}")
+    print(f"CRITICAL ERROR loading database: {e}")
     traceback.print_exc()
 
-# --- Image Processing Logic (REVISED with Aggressive Fallback) ---
+# --- Image Processing Logic (Simplified) ---
 def process_image_data(image_content):
-    if not all([vision_client, groq_client, df_merged is not None]):
+    if not all([vision_client, groq_client, df is not None]):
         return {"status": "Échec: Service non initialisé"}
 
-    # 1. OCR - This is the only hard dependency.
+    # 1. OCR
     try:
         response = vision_client.text_detection(image=vision.Image(content=image_content))
         if not response.text_annotations:
@@ -109,16 +82,13 @@ def process_image_data(image_content):
         print(f"Google Vision API Error: {e}")
         return {"status": "Échec OCR", "details": str(e)}
 
-    # 2. AI Extraction - This is now an enhancement, not a requirement.
-    ai_data = {}
+    # 2. AI Extraction (Simplified Prompt)
     try:
         system_prompt = """
         You are an expert at reading French medication labels (vignettes). Your task is to extract information into a valid JSON object.
-        The JSON must contain these keys: "nom", "dci", "dosage", "conditionnement", "ppa", and "tarif_ref".
-        - "ppa" is the total price.
-        - "tarif_ref" is the "Tarif de Référence". Look for labels like "TR", "T.R", "Tarif", "Tarif de Réf.", etc. It is the reimbursement base price.
+        The JSON must contain these keys: "nom", "dosage", "conditionnement".
         Only return the JSON object.
-        Example: { "nom": "DOLIPRANE", "dci": "PARACETAMOL", "dosage": "1000 MG", "conditionnement": "BTE/8", "ppa": "195.00", "tarif_ref": "150.00" }
+        Example: { "nom": "DOLIPRANE", "dosage": "1000 MG", "conditionnement": "BTE/8" }
         """
         chat_completion = groq_client.chat.completions.create(
             messages=[{"role": "system", "content": system_prompt}, {"role": "user", "content": f"Texte à analyser:\n---\n{ocr_text}\n---"}],
@@ -127,82 +97,55 @@ def process_image_data(image_content):
         ai_data = json.loads(chat_completion.choices[0].message.content)
         print(f"--- AI Data ---\n{ai_data}\n---------------")
     except Exception as e:
-        print(f"Groq AI extraction failed: {e}. Will rely solely on raw text matching.")
-        # ai_data remains an empty dict
+        print(f"Groq AI extraction failed: {e}. This scan will likely fail.")
+        return {"status": "Échec de l'analyse IA", "details": str(e)}
 
     # 3. Response Formatting
     def get_response(db_row, score, status="Vérifié"):
-        # Use AI data if available, otherwise it's empty
-        extracted_ppa = parse_price(ai_data.get('ppa', ''))
-        final_ppa = extracted_ppa or parse_price(db_row.get('PPA'))
         return {
             "nom": db_row.get('Nom Commercial'), "dci": db_row.get('DCI'),
             "dosage": db_row.get('Dosage'), "conditionnement": db_row.get('Présentation'),
-            "ppa": final_ppa, "match_score": score, "status": status,
+            "ppa": db_row.get('PPA'), # Get PPA from the database
+            "match_score": score, "status": status,
             "posologie_qte_prise": "1", "posologie_unite": db_row.get('Forme', ''),
             "posologie_frequence": "3", "posologie_periode": "par jour"
         }
 
-    # 4. Matching Logic - Prioritize AI data if it exists and is reliable
-    result = None
+    # 4. Simplified Matching Logic: Name -> Dosage
+    ocr_name_sig = normalize_string(ai_data.get('nom', ''))
+    if not ocr_name_sig:
+        return {"status": "Échec", "details": "Nom du médicament non trouvé par l'IA."}
+
+    # Step 1: Find the best matching name
+    best_name_match, score_name = process.extractOne(ocr_name_sig, DB_NAMES_MAP.keys(), scorer=fuzz.token_set_ratio)
     
-    # Attempt 1: Tarif-First (only if AI extraction was successful)
-    if ai_data:
-        extracted_tarif = parse_price(ai_data.get('tarif_ref', ''))
-        if extracted_tarif and extracted_tarif in DB_TARIF_MAP:
-            print(f"Attempting match with TR: {extracted_tarif}")
-            tarif_candidates = DB_TARIF_MAP[extracted_tarif]
-            if len(tarif_candidates) == 1:
-                result = get_response(tarif_candidates[0], 100, "Vérifié (Tarif Unique)")
-            else:
-                ocr_name_sig = normalize_string(ai_data.get('nom', ''))
-                candidate_names = {normalize_string(c.get('Nom Commercial')): c for c in tarif_candidates}
-                best_name_match, score = process.extractOne(ocr_name_sig, candidate_names.keys())
-                if score > 80:
-                    result = get_response(candidate_names[best_name_match], score, "Vérifié (Tarif + Nom)")
+    print(f"Name match: '{best_name_match}' with score {score_name}")
     
-    # Attempt 2: Name-first (only if AI data exists and Tarif failed)
-    if not result and ai_data:
-        print("Attempting match with AI-extracted name.")
-        ocr_name_sig = normalize_string(ai_data.get('nom', ''))
-        best_name_match, score_name = process.extractOne(ocr_name_sig, DB_NAMES_MAP.keys(), scorer=fuzz.token_set_ratio)
-        if score_name >= 75:
-            name_candidates = DB_NAMES_MAP[best_name_match]
-            if len(name_candidates) == 1:
-                result = get_response(name_candidates[0], score_name, "Vérifié (Nom unique)")
-            else:
-                ocr_details_sig = normalize_string(f"{ai_data.get('dci','')} {ai_data.get('dosage','')} {ai_data.get('conditionnement','')}")
-                candidate_details = {normalize_string(build_reference_string(c, include_name=False)): c for c in name_candidates}
-                best_details, score_details = process.extractOne(ocr_details_sig, candidate_details.keys(), scorer=fuzz.WRatio)
-                if score_details >= 65:
-                    final_score = int((score_name * 0.6) + (score_details * 0.4))
-                    result = get_response(candidate_details[best_details], final_score, "Auto-Corrigé (Nom + Détails)")
+    if score_name < 75:
+        return {"status": "Échec de la reconnaissance", "details": f"Aucun nom de médicament correspondant trouvé (Score: {score_name})."}
 
-    # Attempt 3: Raw Text Fallback (if AI-based methods failed or were not possible)
-    if not result:
-        print("--- Executing Raw Text Fallback ---")
-        normalized_ocr = normalize_string(ocr_text)
-        
-        # We search against the list of all unique normalized names
-        best_match, score = process.extractOne(normalized_ocr, DB_ALL_NAMES, scorer=fuzz.partial_ratio) # Using partial_ratio is more aggressive
-        print(f"Raw text fallback match: '{best_match}' with score {score}")
-        
-        # Lowering the threshold to catch more possibilities, which will be manually verified
-        if score > 65: 
-            # We found a plausible name. Now get the full drug info.
-            # Since multiple drugs can have the same normalized name, we take the first one as a guess.
-            candidate_drug_list = DB_NAMES_MAP.get(best_match, [])
-            if candidate_drug_list:
-                # This is a guess, so we mark it clearly for user verification.
-                result = get_response(candidate_drug_list[0], score, "Non Vérifié (Scan Brute)")
+    # Step 2: From the candidates with that name, find the best matching details (Dosage + Presentation)
+    candidate_drugs = DB_NAMES_MAP[best_name_match]
+    if len(candidate_drugs) == 1:
+        return get_response(candidate_drugs[0], score_name, "Vérifié (Nom unique)")
 
-    if result:
-        print(f"--- Match Found ---\nStatus: {result.get('status')}, Score: {result.get('match_score')}\n-------------------")
-        return result
+    ocr_details_sig = normalize_string(f"{ai_data.get('dosage','')} {ai_data.get('conditionnement','')}")
+    
+    # Create a dictionary of details-to-drug for the candidates
+    candidate_details_map = {normalize_string(build_details_string(c)): c for c in candidate_drugs}
+    
+    best_details_match, score_details = process.extractOne(ocr_details_sig, candidate_details_map.keys(), scorer=fuzz.WRatio)
+    
+    print(f"Details match: '{best_details_match}' with score {score_details}")
 
-    # This is the final failure point, should be rare now.
-    print("--- No Match Found ---")
-    return {"status": "Échec de la reconnaissance", "details": "Aucune correspondance fiable trouvée dans la base de données."}
+    if score_details < 65:
+        return {"status": "Échec: Ambiguïté", "details": f"Nom '{best_name_match}' trouvé, mais dosage incertain (Score: {score_details})."}
+
+    # Success! We found a confident match for both name and details.
+    final_score = int((score_name * 0.7) + (score_details * 0.3))
+    final_drug = candidate_details_map[best_details_match]
+    
+    return get_response(final_drug, final_score, "Auto-Corrigé")
 
 
 # --- API Routes (unchanged) ---
