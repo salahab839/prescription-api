@@ -33,7 +33,7 @@ except Exception as e:
 def normalize_string(s):
     if not isinstance(s, str): return ""
     s = s.lower()
-    replacements = {'bte': 'b', 'boite': 'b', 'comprimés': 'cp', 'comprimé': 'cp', 'grammes': 'g', 'gramme': 'g', 'milligrammes': 'mg'}
+    replacements = {'bte': 'b', 'boite': 'b', 'comprimés': 'cp', 'comprimé': 'cp', 'grammes': 'g', 'gramme': 'g', 'milligrammes': 'mg', 'injectable': 'inj'}
     for old, new in replacements.items():
         s = s.replace(old, new)
     s = re.sub(r'[^a-z0-9. ]', ' ', s)
@@ -97,7 +97,7 @@ def process_image_data(image_content):
     except Exception as e:
         return {"status": "Échec OCR", "details": str(e)}
 
-    # 2. AI Extraction (with PPA)
+    # 2. AI Extraction
     try:
         system_prompt = """
         You are an expert at reading French medication labels. Your task is to extract information into a valid JSON object.
@@ -110,7 +110,6 @@ def process_image_data(image_content):
             model="llama3-8b-8192", response_format={"type": "json_object"}
         )
         ai_data = json.loads(chat_completion.choices[0].message.content)
-        # RESTORED: Parse the PPA from the AI response
         ai_data['ppa'] = parse_ppa(ai_data.get('ppa', ''))
         print(f"--- AI Data (with parsed PPA) ---\n{ai_data}\n---------------")
     except Exception as e:
@@ -121,7 +120,6 @@ def process_image_data(image_content):
         return {
             "nom": db_row.get('Nom Commercial'), "dci": db_row.get('DCI'),
             "dosage": db_row.get('Dosage'), "conditionnement": db_row.get('Présentation'),
-            # RESTORED: Use the PPA from the AI data (from the vignette)
             "ppa": ai_data.get('ppa'), 
             "match_score": score, "status": status,
             "posologie_qte_prise": "1", "posologie_unite": db_row.get('Forme', ''),
@@ -148,16 +146,44 @@ def process_image_data(image_content):
         if len(exact_dosage_matches) == 1:
             return get_response(exact_dosage_matches[0], 100, status="Vérifié (Dosage Exact)")
         
+        # --- START: MODIFIED LOGIC FOR AMBIGUOUS DOSAGE MATCH ---
         if len(exact_dosage_matches) > 1:
-            ocr_details_sig = normalize_string(f"{ai_data.get('dosage','')} {ai_data.get('conditionnement','')}")
-            candidate_details_map = {normalize_string(build_reference_string(d, include_name=False)): d for d in exact_dosage_matches}
-            best_details_match, score_details = process.extractOne(ocr_details_sig, candidate_details_map.keys(), scorer=fuzz.WRatio)
-            if score_details >= 75:
-                return get_response(candidate_details_map[best_details_match], 99, status="Auto-Corrigé")
+            # More than one drug has the same name and dosage (e.g., Clamoxyl 1g tablets vs injectable).
+            # We must now use the 'présentation'/'conditionnement' to differentiate.
+            ocr_presentation_sig = normalize_string(ai_data.get('conditionnement', ''))
+            
+            if ocr_presentation_sig:
+                # Create a map of {normalized_presentation: drug_record} for candidates
+                candidate_presentations_map = {
+                    normalize_string(d.get('Présentation', '')): d 
+                    for d in exact_dosage_matches
+                }
 
+                # Find the best presentation match. partial_token_set_ratio is good for finding 'cp' within 'bte 12 cp'.
+                best_presentation_match, score_presentation = process.extractOne(
+                    ocr_presentation_sig, 
+                    candidate_presentations_map.keys(), 
+                    scorer=fuzz.partial_token_set_ratio
+                )
+
+                # Use a high threshold for confidence
+                if score_presentation >= 85:
+                    return get_response(candidate_presentations_map[best_presentation_match], score_presentation, status="Vérifié (Forme Exacte)")
+        # --- END: MODIFIED LOGIC ---
+
+    # Fallback to original broader details matching if the above logic didn't return a result
     ocr_details_sig = normalize_string(f"{ai_data.get('dosage','')} {ai_data.get('conditionnement','')}")
-    candidate_details_map = {normalize_string(build_reference_string(d, include_name=False)): d for d in candidate_drugs}
+    
+    # Use all candidates if no exact dosage match, or the ambiguous ones if there were several
+    list_to_search = exact_dosage_matches if 'exact_dosage_matches' in locals() and exact_dosage_matches else candidate_drugs
+    
+    candidate_details_map = {normalize_string(build_reference_string(d, include_name=False)): d for d in list_to_search}
+    
+    if not candidate_details_map:
+        return {"status": "Échec de la reconnaissance", "details": "Aucun candidat à la comparaison trouvé."}
+
     best_details_match, score_details = process.extractOne(ocr_details_sig, candidate_details_map.keys(), scorer=fuzz.WRatio)
+    
     if score_details >= 75:
         final_score = int((score_name * 0.6) + (score_details * 0.4))
         return get_response(candidate_details_map[best_details_match], final_score, status="Auto-Corrigé")
