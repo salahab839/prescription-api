@@ -1,0 +1,11 @@
+# requirements_server.txt
+Flask
+Flask-Cors
+Flask-SocketIO
+gunicorn
+eventlet
+google-cloud-vision
+groq
+pandas
+openpyxl
+thefuzz
