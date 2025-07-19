@@ -36,49 +36,41 @@ def normalize_string(s):
     replacements = {'bte': 'b', 'boite': 'b', 'comprimés': 'cp', 'comprimé': 'cp', 'grammes': 'g', 'gramme': 'g', 'milligrammes': 'mg'}
     for old, new in replacements.items():
         s = s.replace(old, new)
-    s = re.sub(r'[^a-z0-9. ]', ' ', s) # Allow dots for dosages like 1.5
+    s = re.sub(r'[^a-z0-9. ]', ' ', s)
     return re.sub(r'\s+', ' ', s).strip()
 
 def extract_numeric_dosage(dosage_str):
-    """Extracts only the number from a dosage string for precise matching."""
     if not isinstance(dosage_str, str): return None
-    # Find all numbers (including decimals) in the string
     numbers = re.findall(r'(\d+\.?\d*)', dosage_str)
     if numbers:
         return float(numbers[0])
     return None
 
 def build_reference_string(row, include_name=True, include_details=True):
-    """Builds a standardized string from a database row for matching."""
     parts = []
-    if include_name:
-        parts.append(row.get('Nom Commercial', ''))
+    if include_name: parts.append(row.get('Nom Commercial', ''))
     if include_details:
         parts.append(row.get('Dosage', ''))
         parts.append(row.get('Présentation', ''))
     return " ".join(filter(None, parts)).strip()
 
-# --- Database Loading (Restored Original Logic) ---
-DB_SIGNATURE_MAP = {}
-DB_DOSAGE_PRES_MAP = {}
+def parse_ppa(text):
+    """Extracts and cleans the PPA value from text."""
+    if not isinstance(text, str): return ""
+    if '=' in text: text = text.split('=')[-1]
+    elif ':' in text: text = text.split(':')[-1]
+    cleaned_text = re.sub(r'[^0-9,.]', '', text).strip()
+    return cleaned_text.replace(',', '.')
+
+# --- Database Loading ---
 DB_NAMES_MAP = {}
 df = None
 try:
     df = pd.read_excel(DB_PATH).astype(str).fillna('')
-    
-    # Add a numeric dosage column to the DataFrame for precise matching
     df['DosageNumeric'] = df['Dosage'].apply(extract_numeric_dosage)
 
     for index, row in df.iterrows():
         row_dict = row.to_dict()
-        full_signature = normalize_string(build_reference_string(row))
-        DB_SIGNATURE_MAP[full_signature] = row_dict
-
-        dosage_pres_signature = normalize_string(build_reference_string(row, include_name=False))
-        if dosage_pres_signature not in DB_DOSAGE_PRES_MAP:
-            DB_DOSAGE_PRES_MAP[dosage_pres_signature] = []
-        DB_DOSAGE_PRES_MAP[dosage_pres_signature].append(row_dict)
-
         name_signature = normalize_string(build_reference_string(row, include_details=False))
         if name_signature not in DB_NAMES_MAP:
             DB_NAMES_MAP[name_signature] = []
@@ -91,7 +83,7 @@ except Exception as e:
     print(f"CRITICAL ERROR loading database: {e}")
     traceback.print_exc()
 
-# --- Image Processing Logic (With Precise Dosage Matching) ---
+# --- Image Processing Logic ---
 def process_image_data(image_content):
     if not all([vision_client, groq_client, df is not None]):
         return {"status": "Échec: Service non initialisé"}
@@ -100,26 +92,27 @@ def process_image_data(image_content):
     try:
         response = vision_client.text_detection(image=vision.Image(content=image_content))
         if not response.text_annotations:
-            return {"status": "Échec OCR", "details": "Aucun texte détecté sur l'image."}
+            return {"status": "Échec OCR", "details": "Aucun texte détecté."}
         ocr_text = response.text_annotations[0].description
-        print(f"--- OCR Text ---\n{ocr_text}\n-----------------")
     except Exception as e:
         return {"status": "Échec OCR", "details": str(e)}
 
-    # 2. AI Extraction
+    # 2. AI Extraction (with PPA)
     try:
         system_prompt = """
-        You are an expert at reading French medication labels (vignettes). Your task is to extract information into a valid JSON object.
-        The JSON must contain these keys: "nom", "dosage", "conditionnement".
+        You are an expert at reading French medication labels. Your task is to extract information into a valid JSON object.
+        The JSON must contain these keys: "nom", "dosage", "conditionnement", "ppa".
         Only return the JSON object.
-        Example: { "nom": "DOLIPRANE", "dosage": "1000 MG", "conditionnement": "BTE/8" }
+        Example: { "nom": "DOLIPRANE", "dosage": "1000 MG", "conditionnement": "BTE/8", "ppa": "195.00" }
         """
         chat_completion = groq_client.chat.completions.create(
             messages=[{"role": "system", "content": system_prompt}, {"role": "user", "content": f"Texte à analyser:\n---\n{ocr_text}\n---"}],
             model="llama3-8b-8192", response_format={"type": "json_object"}
         )
         ai_data = json.loads(chat_completion.choices[0].message.content)
-        print(f"--- AI Data ---\n{ai_data}\n---------------")
+        # RESTORED: Parse the PPA from the AI response
+        ai_data['ppa'] = parse_ppa(ai_data.get('ppa', ''))
+        print(f"--- AI Data (with parsed PPA) ---\n{ai_data}\n---------------")
     except Exception as e:
         return {"status": "Échec de l'analyse IA", "details": str(e)}
 
@@ -128,63 +121,47 @@ def process_image_data(image_content):
         return {
             "nom": db_row.get('Nom Commercial'), "dci": db_row.get('DCI'),
             "dosage": db_row.get('Dosage'), "conditionnement": db_row.get('Présentation'),
-            "ppa": db_row.get('PPA'),
+            # RESTORED: Use the PPA from the AI data (from the vignette)
+            "ppa": ai_data.get('ppa'), 
             "match_score": score, "status": status,
             "posologie_qte_prise": "1", "posologie_unite": db_row.get('Forme', ''),
             "posologie_frequence": "3", "posologie_periode": "par jour"
         }
 
-    # 4. New Matching Logic: Name -> Exact Dosage -> Fuzzy Details
+    # 4. Matching Logic
     ocr_name_sig = normalize_string(ai_data.get('nom',''))
     ocr_numeric_dosage = extract_numeric_dosage(ai_data.get('dosage'))
     
     if not ocr_name_sig:
         return {"status": "Échec", "details": "Nom du médicament non trouvé par l'IA."}
 
-    # Step 1: Find the best matching name
     best_name_match, score_name = process.extractOne(ocr_name_sig, DB_NAMES_MAP.keys(), scorer=fuzz.token_set_ratio)
     
-    print(f"Name match: '{best_name_match}' with score {score_name}")
-    
-    if score_name < 80: # Slightly more lenient on name if dosage is a good match
-        return {"status": "Échec de la reconnaissance", "details": f"Aucun nom de médicament correspondant trouvé (Score: {score_name})."}
+    if score_name < 80:
+        return {"status": "Échec de la reconnaissance", "details": f"Nom non correspondant (Score: {score_name})."}
 
-    # Step 2: Filter candidates by the best name match
     candidate_drugs = DB_NAMES_MAP[best_name_match]
     
-    # Step 3: Find an exact numeric dosage match among candidates
     if ocr_numeric_dosage is not None:
-        exact_dosage_matches = []
-        for drug in candidate_drugs:
-            if drug.get('DosageNumeric') == ocr_numeric_dosage:
-                exact_dosage_matches.append(drug)
+        exact_dosage_matches = [d for d in candidate_drugs if d.get('DosageNumeric') == ocr_numeric_dosage]
         
         if len(exact_dosage_matches) == 1:
-            print(f"Match found on Tier 1 (Name + Exact Dosage): '{best_name_match}' with dosage {ocr_numeric_dosage}")
             return get_response(exact_dosage_matches[0], 100, status="Vérifié (Dosage Exact)")
         
-        # If multiple drugs have the same name and dosage, use presentation to break the tie
         if len(exact_dosage_matches) > 1:
-            print(f"Multiple exact dosage matches found. Disambiguating with presentation...")
             ocr_details_sig = normalize_string(f"{ai_data.get('dosage','')} {ai_data.get('conditionnement','')}")
-            candidate_details_map = {normalize_string(build_reference_string(drug, include_name=False)): drug for drug in exact_dosage_matches}
+            candidate_details_map = {normalize_string(build_reference_string(d, include_name=False)): d for d in exact_dosage_matches}
             best_details_match, score_details = process.extractOne(ocr_details_sig, candidate_details_map.keys(), scorer=fuzz.WRatio)
             if score_details >= 75:
-                print(f"Match found on Tier 2 (Name + Exact Dosage + Presentation): '{best_name_match}' + '{best_details_match}'")
                 return get_response(candidate_details_map[best_details_match], 99, status="Auto-Corrigé")
 
-    # Fallback to original fuzzy matching if exact dosage fails
-    print("Exact dosage match failed. Falling back to fuzzy details matching.")
     ocr_details_sig = normalize_string(f"{ai_data.get('dosage','')} {ai_data.get('conditionnement','')}")
-    candidate_details_map = {normalize_string(build_reference_string(drug, include_name=False)): drug for drug in candidate_drugs}
+    candidate_details_map = {normalize_string(build_reference_string(d, include_name=False)): d for d in candidate_drugs}
     best_details_match, score_details = process.extractOne(ocr_details_sig, candidate_details_map.keys(), scorer=fuzz.WRatio)
     if score_details >= 75:
-        print(f"Match found on Tier 3 (Name + Fuzzy Details): '{best_name_match}' + '{best_details_match}'")
         final_score = int((score_name * 0.6) + (score_details * 0.4))
         return get_response(candidate_details_map[best_details_match], final_score, status="Auto-Corrigé")
 
-    # If all tiers fail
-    print("All matching tiers failed.")
     return {"status": "Échec de la reconnaissance", "details": "Aucune correspondance fiable trouvée."}
 
 
@@ -247,7 +224,7 @@ def process_vignette_endpoint():
         return jsonify({"data": processed_data, "image_base64": image_base64})
     except Exception as e:
         traceback.print_exc()
-        return jsonify({"error": f"Une erreur interne est survenue: {e}"}), 500
+        return jsonify({"error": f"Erreur de traitement: {e}"}), 500
 
 if __name__ == '__main__':
     app.run(host='0.0.0.0', port=int(os.environ.get('PORT', 8080)))
