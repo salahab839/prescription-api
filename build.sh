@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
 # exit on error
-set -e
+set -o errexit
 
-pip install -r requirements.txt
+# Use the server-specific requirements file
+pip install -r requirements_server.txt
