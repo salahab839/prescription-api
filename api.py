@@ -93,12 +93,12 @@ except Exception as e:
     print(f"CRITICAL ERROR loading/merging databases: {e}")
     traceback.print_exc()
 
-# --- Image Processing Logic (REVISED with Fallback) ---
+# --- Image Processing Logic (REVISED with Aggressive Fallback) ---
 def process_image_data(image_content):
     if not all([vision_client, groq_client, df_merged is not None]):
         return {"status": "Échec: Service non initialisé"}
 
-    # 1. OCR
+    # 1. OCR - This is the only hard dependency.
     try:
         response = vision_client.text_detection(image=vision.Image(content=image_content))
         if not response.text_annotations:
@@ -109,7 +109,7 @@ def process_image_data(image_content):
         print(f"Google Vision API Error: {e}")
         return {"status": "Échec OCR", "details": str(e)}
 
-    # 2. AI Extraction
+    # 2. AI Extraction - This is now an enhancement, not a requirement.
     ai_data = {}
     try:
         system_prompt = """
@@ -125,12 +125,14 @@ def process_image_data(image_content):
             model="llama3-8b-8192", response_format={"type": "json_object"}
         )
         ai_data = json.loads(chat_completion.choices[0].message.content)
+        print(f"--- AI Data ---\n{ai_data}\n---------------")
     except Exception as e:
-        print(f"Groq AI extraction failed: {e}. Proceeding with raw text fallback.")
-        # Do not return; allow the code to fall through to the raw text matching
+        print(f"Groq AI extraction failed: {e}. Will rely solely on raw text matching.")
+        # ai_data remains an empty dict
 
-    # 3. Signature Creation and Response Formatting
-    def get_verified_response(db_row, score, status="Vérifié"):
+    # 3. Response Formatting
+    def get_response(db_row, score, status="Vérifié"):
+        # Use AI data if available, otherwise it's empty
         extracted_ppa = parse_price(ai_data.get('ppa', ''))
         final_ppa = extracted_ppa or parse_price(db_row.get('PPA'))
         return {
@@ -141,52 +143,66 @@ def process_image_data(image_content):
             "posologie_frequence": "3", "posologie_periode": "par jour"
         }
 
-    # 4. Matching Logic
+    # 4. Matching Logic - Prioritize AI data if it exists and is reliable
     result = None
-
-    # Attempt 1: Tarif-First (most reliable)
-    extracted_tarif = parse_price(ai_data.get('tarif_ref', ''))
-    if extracted_tarif and extracted_tarif in DB_TARIF_MAP:
-        tarif_candidates = DB_TARIF_MAP[extracted_tarif]
-        if len(tarif_candidates) == 1:
-            result = get_verified_response(tarif_candidates[0], 100, "Vérifié (Tarif Unique)")
-        else:
-            ocr_name_sig = normalize_string(ai_data.get('nom', ''))
-            candidate_names = {normalize_string(c.get('Nom Commercial')): c for c in tarif_candidates}
-            best_name_match, score = process.extractOne(ocr_name_sig, candidate_names.keys())
-            if score > 80:
-                result = get_verified_response(candidate_names[best_name_match], score, "Vérifié (Tarif + Nom)")
-
-    # Attempt 2: Name-first (if AI data exists and Tarif failed)
+    
+    # Attempt 1: Tarif-First (only if AI extraction was successful)
+    if ai_data:
+        extracted_tarif = parse_price(ai_data.get('tarif_ref', ''))
+        if extracted_tarif and extracted_tarif in DB_TARIF_MAP:
+            print(f"Attempting match with TR: {extracted_tarif}")
+            tarif_candidates = DB_TARIF_MAP[extracted_tarif]
+            if len(tarif_candidates) == 1:
+                result = get_response(tarif_candidates[0], 100, "Vérifié (Tarif Unique)")
+            else:
+                ocr_name_sig = normalize_string(ai_data.get('nom', ''))
+                candidate_names = {normalize_string(c.get('Nom Commercial')): c for c in tarif_candidates}
+                best_name_match, score = process.extractOne(ocr_name_sig, candidate_names.keys())
+                if score > 80:
+                    result = get_response(candidate_names[best_name_match], score, "Vérifié (Tarif + Nom)")
+    
+    # Attempt 2: Name-first (only if AI data exists and Tarif failed)
     if not result and ai_data:
+        print("Attempting match with AI-extracted name.")
         ocr_name_sig = normalize_string(ai_data.get('nom', ''))
         best_name_match, score_name = process.extractOne(ocr_name_sig, DB_NAMES_MAP.keys(), scorer=fuzz.token_set_ratio)
         if score_name >= 75:
             name_candidates = DB_NAMES_MAP[best_name_match]
             if len(name_candidates) == 1:
-                result = get_verified_response(name_candidates[0], score_name, "Vérifié (Nom unique)")
+                result = get_response(name_candidates[0], score_name, "Vérifié (Nom unique)")
             else:
                 ocr_details_sig = normalize_string(f"{ai_data.get('dci','')} {ai_data.get('dosage','')} {ai_data.get('conditionnement','')}")
                 candidate_details = {normalize_string(build_reference_string(c, include_name=False)): c for c in name_candidates}
                 best_details, score_details = process.extractOne(ocr_details_sig, candidate_details.keys(), scorer=fuzz.WRatio)
                 if score_details >= 65:
                     final_score = int((score_name * 0.6) + (score_details * 0.4))
-                    result = get_verified_response(candidate_details[best_details], final_score, "Auto-Corrigé (Nom + Détails)")
-    
-    # Attempt 3: Raw Text Fallback (if everything else failed)
+                    result = get_response(candidate_details[best_details], final_score, "Auto-Corrigé (Nom + Détails)")
+
+    # Attempt 3: Raw Text Fallback (if AI-based methods failed or were not possible)
     if not result:
         print("--- Executing Raw Text Fallback ---")
         normalized_ocr = normalize_string(ocr_text)
-        best_match, score = process.extractOne(normalized_ocr, DB_ALL_NAMES, scorer=fuzz.token_set_ratio)
-        if score > 70: # Use a reasonable threshold for this less accurate method
-            # Since we only have the name, we take the first candidate. This is why it needs verification.
-            candidate_drug = DB_NAMES_MAP[best_match][0]
-            result = get_verified_response(candidate_drug, score, "Non Vérifié (Scan Brute)")
+        
+        # We search against the list of all unique normalized names
+        best_match, score = process.extractOne(normalized_ocr, DB_ALL_NAMES, scorer=fuzz.partial_ratio) # Using partial_ratio is more aggressive
+        print(f"Raw text fallback match: '{best_match}' with score {score}")
+        
+        # Lowering the threshold to catch more possibilities, which will be manually verified
+        if score > 65: 
+            # We found a plausible name. Now get the full drug info.
+            # Since multiple drugs can have the same normalized name, we take the first one as a guess.
+            candidate_drug_list = DB_NAMES_MAP.get(best_match, [])
+            if candidate_drug_list:
+                # This is a guess, so we mark it clearly for user verification.
+                result = get_response(candidate_drug_list[0], score, "Non Vérifié (Scan Brute)")
 
     if result:
+        print(f"--- Match Found ---\nStatus: {result.get('status')}, Score: {result.get('match_score')}\n-------------------")
         return result
 
-    return {"status": "Échec de la reconnaissance", "details": f"Aucune correspondance fiable trouvée."}
+    # This is the final failure point, should be rare now.
+    print("--- No Match Found ---")
+    return {"status": "Échec de la reconnaissance", "details": "Aucune correspondance fiable trouvée dans la base de données."}
 
 
 # --- API Routes (unchanged) ---
@@ -248,7 +264,7 @@ def process_vignette_endpoint():
         return jsonify({"data": processed_data, "image_base64": image_base64})
     except Exception as e:
         traceback.print_exc()
-        return jsonify({"error": f"Une erreur interne est survenue: {e}"}), 500
+        return jsonify({"error": f"Erreur de traitement: {e}"}), 500
 
 if __name__ == '__main__':
     app.run(host='0.0.0.0', port=int(os.environ.get('PORT', 8080)))
