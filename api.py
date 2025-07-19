@@ -1,14 +1,19 @@
 # api.py
 
+# --- FIX for eventlet crash ---
+# These two lines MUST be the first lines of code to be executed.
+import eventlet
+eventlet.monkey_patch()
+# -----------------------------
+
 import os
 import traceback
-import json
-import re
 import pandas as pd
 import uuid
 import time
 import base64
-from flask import Flask, request, jsonify, render_template # Import render_template
+import re
+from flask import Flask, request, jsonify, render_template
 from flask_cors import CORS
 from flask_socketio import SocketIO, join_room
 from functools import lru_cache
@@ -20,10 +25,11 @@ from thefuzz import process, fuzz
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 DB_PATH = os.path.join(BASE_DIR, "chifa_data.xlsx")
 
-# MODIFICATION 1: Tell Flask where to find the HTML templates
 app = Flask(__name__, template_folder='templates')
 CORS(app)
-socketio = SocketIO(app, cors_allowed_origins="*", async_mode='eventlet')
+# Note: async_mode is no longer explicitly set to 'eventlet' here
+# because monkey_patch() and the gunicorn command handle it.
+socketio = SocketIO(app, cors_allowed_origins="*")
 SESSIONS = {}
 
 # --- Initialize Clients ---
@@ -46,25 +52,42 @@ def normalize_string(s):
     return s
 
 def load_database():
+    """Loads and pre-processes the medication database."""
     try:
+        if not os.path.exists(DB_PATH):
+            print(f"CRITICAL ERROR: Database file not found at {DB_PATH}. Make sure it's in your Git repository.")
+            return pd.DataFrame() # Return empty DataFrame
+        
         df = pd.read_excel(DB_PATH)
+        # Check if the essential column exists
+        if 'NOM_MED' not in df.columns:
+            print(f"CRITICAL ERROR: 'NOM_MED' column not found in {DB_PATH}. Check the Excel file.")
+            print(f"Available columns are: {df.columns.tolist()}")
+            return pd.DataFrame()
+
         df['normalized_name'] = df['NOM_MED'].apply(normalize_string)
         print("Database loaded and pre-processed successfully.")
         return df
     except Exception as e:
-        print(f"CRITICAL ERROR: Could not load database {DB_PATH}. Error: {e}")
+        print(f"CRITICAL ERROR: Could not load or process database {DB_PATH}. Error: {e}")
         return pd.DataFrame()
 
 MEDS_DF = load_database()
 
 @lru_cache(maxsize=256)
 def find_best_match_in_db(text_to_search):
-    if MEDS_DF.empty: return None
+    if MEDS_DF.empty:
+        print("Skipping search: Medication database is empty or not loaded.")
+        return None
+    
     normalized_text = normalize_string(text_to_search)
     choices = MEDS_DF['normalized_name'].to_list()
+    
     best_match_tuple = process.extractOne(normalized_text, choices, scorer=fuzz.token_sort_ratio)
+    
     if not best_match_tuple: return None
     best_match_name, score = best_match_tuple
+
     if score > 85:
         match_row = MEDS_DF[MEDS_DF['normalized_name'] == best_match_name].iloc[0]
         return {
@@ -107,11 +130,8 @@ def on_join(data):
         print(f"Client joined room: {session_id}")
 
 # --- API Endpoints ---
-
-# MODIFICATION 2: Add this new route to serve the web page
 @app.route('/')
 def index():
-    """Serves the mobile uploader web page."""
     return render_template('uploader.html')
 
 @app.route('/api/start-session', methods=['POST'])
@@ -146,5 +166,6 @@ def finish_session(session_id):
         socketio.emit('session_finished', room=session_id)
     return jsonify({"status": "success"})
 
+# This local run block is not used by gunicorn but is good for testing
 if __name__ == '__main__':
     socketio.run(app, debug=True, port=5000)
