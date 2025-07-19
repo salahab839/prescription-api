@@ -1,10 +1,6 @@
 # api.py
-
-# --- FIX for eventlet crash ---
-# These two lines MUST be the first lines of code to be executed.
 import eventlet
 eventlet.monkey_patch()
-# -----------------------------
 
 import os
 import traceback
@@ -21,18 +17,14 @@ from google.cloud import vision
 from groq import Groq
 from thefuzz import process, fuzz
 
-# --- Setup ---
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 DB_PATH = os.path.join(BASE_DIR, "chifa_data.xlsx")
 
 app = Flask(__name__, template_folder='templates')
 CORS(app)
-# Note: async_mode is no longer explicitly set to 'eventlet' here
-# because monkey_patch() and the gunicorn command handle it.
 socketio = SocketIO(app, cors_allowed_origins="*")
 SESSIONS = {}
 
-# --- Initialize Clients ---
 try:
     vision_client = vision.ImageAnnotatorClient()
     groq_client = Groq(api_key=os.environ.get("GROQ_API_KEY"))
@@ -41,7 +33,6 @@ except Exception as e:
     vision_client = None
     groq_client = None
 
-# --- Helper Functions & DB Loading ---
 def normalize_string(s):
     if not isinstance(s, str): return ""
     s = s.lower()
@@ -52,17 +43,14 @@ def normalize_string(s):
     return s
 
 def load_database():
-    """Loads and pre-processes the medication database."""
     try:
         if not os.path.exists(DB_PATH):
-            print(f"CRITICAL ERROR: Database file not found at {DB_PATH}. Make sure it's in your Git repository.")
-            return pd.DataFrame() # Return empty DataFrame
+            print(f"CRITICAL ERROR: Database file not found at {DB_PATH}.")
+            return pd.DataFrame()
         
         df = pd.read_excel(DB_PATH)
-        # Check if the essential column exists
         if 'NOM_MED' not in df.columns:
-            print(f"CRITICAL ERROR: 'NOM_MED' column not found in {DB_PATH}. Check the Excel file.")
-            print(f"Available columns are: {df.columns.tolist()}")
+            print(f"CRITICAL ERROR: 'NOM_MED' column not found in {DB_PATH}.")
             return pd.DataFrame()
 
         df['normalized_name'] = df['NOM_MED'].apply(normalize_string)
@@ -77,17 +65,12 @@ MEDS_DF = load_database()
 @lru_cache(maxsize=256)
 def find_best_match_in_db(text_to_search):
     if MEDS_DF.empty:
-        print("Skipping search: Medication database is empty or not loaded.")
         return None
-    
     normalized_text = normalize_string(text_to_search)
     choices = MEDS_DF['normalized_name'].to_list()
-    
     best_match_tuple = process.extractOne(normalized_text, choices, scorer=fuzz.token_sort_ratio)
-    
     if not best_match_tuple: return None
     best_match_name, score = best_match_tuple
-
     if score > 85:
         match_row = MEDS_DF[MEDS_DF['normalized_name'] == best_match_name].iloc[0]
         return {
@@ -121,7 +104,6 @@ def process_image_data(image_content):
     )
     return chat_completion.choices[0].message.content
 
-# --- WebSocket Events ---
 @socketio.on('join')
 def on_join(data):
     session_id = data.get('session_id')
@@ -129,7 +111,6 @@ def on_join(data):
         join_room(session_id)
         print(f"Client joined room: {session_id}")
 
-# --- API Endpoints ---
 @app.route('/')
 def index():
     return render_template('uploader.html')
@@ -166,6 +147,5 @@ def finish_session(session_id):
         socketio.emit('session_finished', room=session_id)
     return jsonify({"status": "success"})
 
-# This local run block is not used by gunicorn but is good for testing
 if __name__ == '__main__':
     socketio.run(app, debug=True, port=5000)
