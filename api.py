@@ -33,7 +33,7 @@ except Exception as e:
 def normalize_string(s):
     if not isinstance(s, str): return ""
     s = s.lower()
-    replacements = {'bte': 'b', 'boite': 'b', 'comprimés': 'cp', 'comprimé': 'cp', 'grammes': 'g', 'gramme': 'g', 'milligrammes': 'mg', 'injectable': 'inj'}
+    replacements = {'bte': 'b', 'boite': 'b', 'comprimés': 'cp', 'comprimé': 'cp', 'grammes': 'g', 'gramme': 'g', 'milligrammes': 'mg', 'injectable': 'inj', 'ampoule': 'amp'}
     for old, new in replacements.items():
         s = s.replace(old, new)
     s = re.sub(r'[^a-z0-9. ]', ' ', s)
@@ -45,6 +45,13 @@ def extract_numeric_dosage(dosage_str):
     if numbers:
         return float(numbers[0])
     return None
+
+# --- NEW HELPER FUNCTION ---
+def extract_numbers_from_string(s):
+    """Extracts all integer numbers from a string and returns them as a list."""
+    if not isinstance(s, str): return []
+    return [int(num) for num in re.findall(r'\d+', s)]
+# --- END NEW HELPER FUNCTION ---
 
 def build_reference_string(row, include_name=True, include_details=True):
     parts = []
@@ -66,7 +73,12 @@ def parse_ppa(text):
 DB_NAMES_MAP = {}
 df = None
 try:
-    df = pd.read_excel(DB_PATH).astype(str).fillna('')
+    # Try reading as Excel first, then fallback to CSV.
+    try:
+        df = pd.read_excel(DB_PATH).astype(str).fillna('')
+    except Exception:
+        df = pd.read_csv(DB_PATH).astype(str).fillna('')
+        
     df['DosageNumeric'] = df['Dosage'].apply(extract_numeric_dosage)
 
     for index, row in df.iterrows():
@@ -103,7 +115,7 @@ def process_image_data(image_content):
         You are an expert at reading French medication labels. Your task is to extract information into a valid JSON object.
         The JSON must contain these keys: "nom", "dosage", "conditionnement", "ppa".
         Only return the JSON object.
-        Example: { "nom": "DOLIPRANE", "dosage": "1000 MG", "conditionnement": "BTE/8", "ppa": "195.00" }
+        Example: { "nom": "CLAMOXYL", "dosage": "1 G", "conditionnement": "B/14", "ppa": "450.00" }
         """
         chat_completion = groq_client.chat.completions.create(
             messages=[{"role": "system", "content": system_prompt}, {"role": "user", "content": f"Texte à analyser:\n---\n{ocr_text}\n---"}],
@@ -146,37 +158,40 @@ def process_image_data(image_content):
         if len(exact_dosage_matches) == 1:
             return get_response(exact_dosage_matches[0], 100, status="Vérifié (Dosage Exact)")
         
-        # --- START: MODIFIED LOGIC FOR AMBIGUOUS DOSAGE MATCH ---
+        # --- START: REVISED LOGIC FOR AMBIGUOUS DOSAGE MATCH ---
         if len(exact_dosage_matches) > 1:
-            # More than one drug has the same name and dosage (e.g., Clamoxyl 1g tablets vs injectable).
-            # We must now use the 'présentation'/'conditionnement' to differentiate.
-            ocr_presentation_sig = normalize_string(ai_data.get('conditionnement', ''))
+            ocr_presentation_str = ai_data.get('conditionnement', '')
             
+            # STRATEGY 1: Match by numbers in the presentation (e.g., 14 in "B/14"). This is very reliable.
+            ocr_numbers = extract_numbers_from_string(ocr_presentation_str)
+            if ocr_numbers:
+                possible_matches = []
+                for drug in exact_dosage_matches:
+                    db_numbers = extract_numbers_from_string(drug.get('Présentation', ''))
+                    if db_numbers and sorted(ocr_numbers) == sorted(db_numbers):
+                        possible_matches.append(drug)
+                if len(possible_matches) == 1:
+                    return get_response(possible_matches[0], 100, status="Vérifié (N° de conditionnement)")
+
+            # STRATEGY 2: Fuzzy match on the presentation text (e.g., "cp" vs "inj"). Good fallback.
+            ocr_presentation_sig = normalize_string(ocr_presentation_str)
             if ocr_presentation_sig:
-                # Create a map of {normalized_presentation: drug_record} for candidates
                 candidate_presentations_map = {
                     normalize_string(d.get('Présentation', '')): d 
                     for d in exact_dosage_matches
                 }
-
-                # Find the best presentation match. partial_token_set_ratio is good for finding 'cp' within 'bte 12 cp'.
-                best_presentation_match, score_presentation = process.extractOne(
+                best_match, score = process.extractOne(
                     ocr_presentation_sig, 
                     candidate_presentations_map.keys(), 
                     scorer=fuzz.partial_token_set_ratio
                 )
-
-                # Use a high threshold for confidence
-                if score_presentation >= 85:
-                    return get_response(candidate_presentations_map[best_presentation_match], score_presentation, status="Vérifié (Forme Exacte)")
-        # --- END: MODIFIED LOGIC ---
+                if score >= 85:
+                    return get_response(candidate_presentations_map[best_match], score, status="Vérifié (Forme Exacte)")
+        # --- END: REVISED LOGIC ---
 
     # Fallback to original broader details matching if the above logic didn't return a result
     ocr_details_sig = normalize_string(f"{ai_data.get('dosage','')} {ai_data.get('conditionnement','')}")
-    
-    # Use all candidates if no exact dosage match, or the ambiguous ones if there were several
     list_to_search = exact_dosage_matches if 'exact_dosage_matches' in locals() and exact_dosage_matches else candidate_drugs
-    
     candidate_details_map = {normalize_string(build_reference_string(d, include_name=False)): d for d in list_to_search}
     
     if not candidate_details_map:
