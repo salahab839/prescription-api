@@ -1,11 +1,4 @@
-# api.py (YOUR LOGIC + SPEED FIX)
-
-# --- SPEED FIX: START ---
-import eventlet
-eventlet.monkey_patch()
-from flask_socketio import SocketIO, join_room
-# --- SPEED FIX: END ---
-
+# api.py
 import os
 import traceback
 import json
@@ -20,7 +13,7 @@ from google.cloud import vision
 from groq import Groq
 from thefuzz import process, fuzz
 
-# --- Setup (Your Original Code) ---
+# --- Setup ---
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 DB_PATH = os.path.join(BASE_DIR, "chifa_data.xlsx")
 
@@ -28,11 +21,7 @@ app = Flask(__name__, template_folder='templates')
 CORS(app)
 SESSIONS = {}
 
-# --- SPEED FIX: Add SocketIO to your app ---
-socketio = SocketIO(app, cors_allowed_origins="*")
-# --- END SPEED FIX ---
-
-# --- Initialize Clients (Your Original Code) ---
+# --- Initialize Clients ---
 try:
     vision_client = vision.ImageAnnotatorClient()
     groq_client = Groq(api_key=os.environ.get("GROQ_API_KEY"))
@@ -41,7 +30,7 @@ except Exception as e:
     vision_client = None
     groq_client = None
 
-# --- ALL YOUR HELPER FUNCTIONS AND DB LOADING ARE UNTOUCHED ---
+# --- Helper Functions & DB Loading ---
 def normalize_string(s):
     if not isinstance(s, str): return ""
     s = s.lower()
@@ -77,6 +66,7 @@ def parse_ppa(text):
     cleaned_text = re.sub(r'[^0-9,.]', '', text).strip()
     return cleaned_text.replace(',', '.')
 
+# --- Database Loading ---
 DB_NAMES_MAP = {}
 df = None
 try:
@@ -98,6 +88,7 @@ except Exception as e:
     print(f"CRITICAL ERROR loading database: {e}")
     traceback.print_exc()
 
+# --- Image Processing Logic ---
 def process_image_data(image_content):
     if not all([vision_client, groq_client, df is not None]):
         return {"status": "Échec: Service non initialisé"}
@@ -181,26 +172,14 @@ def process_image_data(image_content):
         final_score = int((score_name * 0.6) + (score_details * 0.4))
         return get_response(candidate_details_map[best_details_match], final_score, status="Auto-Corrigé")
     return {"status": "Échec de la reconnaissance", "details": "Aucune correspondance fiable trouvée."}
-# --- END OF YOUR UNTOUCHED LOGIC ---
 
 # --- API Routes ---
 @app.route('/api/create-session', methods=['POST'])
 def create_session():
     session_id = str(uuid.uuid4())
-    # YOUR ORIGINAL SESSION LOGIC
     SESSIONS[session_id] = {"status": "pending", "medications": [], "timestamp": time.time()}
     return jsonify({"session_id": session_id})
 
-# --- SPEED FIX: Add WebSocket event handler ---
-@socketio.on('join')
-def on_join(data):
-    session_id = data.get('session_id')
-    if session_id:
-        join_room(session_id)
-        print(f"Desktop client joined room: {session_id}")
-# --- END SPEED FIX ---
-
-# YOUR ORIGINAL ROUTES UNTOUCHED
 @app.route('/phone-upload/<session_id>')
 def phone_upload_page(session_id):
     return render_template('uploader.html') if session_id in SESSIONS else ("Session invalide.", 404)
@@ -216,14 +195,7 @@ def upload_by_session(session_id):
         processed_data = process_image_data(image_content)
         if "Échec" not in processed_data.get("status", ""):
             image_base64 = base64.b64encode(image_content).decode('utf-8')
-            new_med_entry = {"data": processed_data, "image_base64": image_base64}
-            # YOUR ORIGINAL LOGIC
-            SESSIONS[session_id]['medications'].append(new_med_entry)
-            
-            # --- SPEED FIX: Send data instantly to desktop app ---
-            socketio.emit('new_medication', new_med_entry, room=session_id)
-            # --- END SPEED FIX ---
-
+            SESSIONS[session_id]['medications'].append({"data": processed_data, "image_base64": image_base64})
             return jsonify({"status": "success", "message": "Médicament ajouté."})
         else:
             return jsonify({"status": "failure", "message": processed_data.get("details", "Vignette illisible")})
@@ -231,24 +203,19 @@ def upload_by_session(session_id):
         traceback.print_exc()
         return jsonify({"error": f"Erreur de traitement: {e}"}), 500
 
-# YOUR ORIGINAL ROUTES UNTOUCHED
 @app.route('/api/finish-session/<session_id>', methods=['POST'])
 def finish_session(session_id):
     if session_id in SESSIONS:
         SESSIONS[session_id]['status'] = 'finished'
-        # --- SPEED FIX: Notify desktop app instantly ---
-        socketio.emit('session_finished', room=session_id)
-        # --- END SPEED FIX ---
         return jsonify({"status": "success"})
     return jsonify({"error": "Session invalide"}), 404
 
-# This route is now only a fallback, WebSockets are primary
 @app.route('/api/check-session/<session_id>')
 def check_session(session_id):
     if session_id not in SESSIONS:
         return jsonify({"status": "invalid"}), 404
     session_info = SESSIONS[session_id]
-    if time.time() - session_info.get("timestamp", 0) > 600: # 10 minute timeout
+    if time.time() - session_info.get("timestamp", 0) > 600:
         if session_id in SESSIONS:
             del SESSIONS[session_id]
         return jsonify({"status": "expired"}), 410
@@ -267,7 +234,5 @@ def process_vignette_endpoint():
         traceback.print_exc()
         return jsonify({"error": f"Erreur de traitement: {e}"}), 500
 
-# Use socketio.run for development, gunicorn command on server
 if __name__ == '__main__':
-    # OLD: app.run(...)
-    socketio.run(app, host='0.0.0.0', port=int(os.environ.get('PORT', 8080)))
+    app.run(host='0.0.0.0', port=int(os.environ.get('PORT', 8080)))
