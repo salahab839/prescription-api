@@ -1,18 +1,15 @@
-# requirements.txt (for local development)
 Flask
-Flask-Cors
-Flask-SocketIO
 gunicorn
-eventlet
 google-cloud-vision
+Flask-Cors
 groq
 pandas
 openpyxl
 thefuzz
-# UI and Automation Libraries
+# Added for the modern UI theme
 sv-ttk
+# Required for automation and QR codes
 pyautogui
 pywinauto
 pyperclip
 qrcode[pil]
-python-socketio[client]
