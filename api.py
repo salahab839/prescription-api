@@ -61,36 +61,25 @@ def parse_price(text):
 
 # --- Database Loading and Merging ---
 DB_NAMES_MAP = {}
-DB_TARIF_MAP = {} # Map for Tarif de Référence lookups
+DB_TARIF_MAP = {}
+DB_ALL_NAMES = [] # For raw text fallback
 df_merged = None
 try:
     df_main = pd.read_csv(DB_MAIN_PATH).astype(str).fillna('')
-    print(f"Main DB loaded with {len(df_main)} records.")
-
     df_tarif_source = pd.read_csv(DB_TARIF_PATH).astype(str).fillna('')
-    # IMPORTANT: Assumes the reference price column is named 'Tarif'. If not, change it here.
-    if 'Tarif' not in df_tarif_source.columns:
-        if 'PPA' in df_tarif_source.columns:
-            print("WARNING: 'Tarif' column not found in tariff DB, renaming 'PPA' to 'Tarif'.")
-            df_tarif_source = df_tarif_source.rename(columns={'PPA': 'Tarif'})
-        else:
-            raise ValueError("'Tarif' or 'PPA' column not found in the tariff source file.")
-    print(f"Tariff DB loaded with {len(df_tarif_source)} records.")
-
+    if 'Tarif' not in df_tarif_source.columns and 'PPA' in df_tarif_source.columns:
+        df_tarif_source = df_tarif_source.rename(columns={'PPA': 'Tarif'})
+    
     merge_keys = ['Nom Commercial', 'Dosage', 'Présentation']
-    for key in merge_keys:
-        if key not in df_main.columns: raise ValueError(f"Merge key '{key}' not in main DB.")
-        if key not in df_tarif_source.columns: raise ValueError(f"Merge key '{key}' not in tariff DB.")
-
     df_merged = pd.merge(df_main, df_tarif_source[['Tarif'] + merge_keys], on=merge_keys, how='left')
-    print(f"Merged DB created with {len(df_merged)} records.")
-
+    
     for index, row in df_merged.iterrows():
         row_dict = row.to_dict()
-        
         name_signature = normalize_string(row_dict.get('Nom Commercial', ''))
         if name_signature:
-            if name_signature not in DB_NAMES_MAP: DB_NAMES_MAP[name_signature] = []
+            if name_signature not in DB_NAMES_MAP:
+                DB_NAMES_MAP[name_signature] = []
+                DB_ALL_NAMES.append(name_signature) # Add unique normalized names for fallback search
             DB_NAMES_MAP[name_signature].append(row_dict)
         
         tarif_str = parse_price(row_dict.get('Tarif', ''))
@@ -98,31 +87,37 @@ try:
             if tarif_str not in DB_TARIF_MAP: DB_TARIF_MAP[tarif_str] = []
             DB_TARIF_MAP[tarif_str].append(row_dict)
 
-    print(f"Database maps created. {len(DB_TARIF_MAP)} unique reference tariffs found.")
+    print(f"Database ready. {len(DB_TARIF_MAP)} unique tariffs, {len(DB_ALL_NAMES)} unique names.")
 
 except Exception as e:
     print(f"CRITICAL ERROR loading/merging databases: {e}")
     traceback.print_exc()
 
-# --- Image Processing Logic (REVISED with Tarif de Référence) ---
+# --- Image Processing Logic (REVISED with Fallback) ---
 def process_image_data(image_content):
     if not all([vision_client, groq_client, df_merged is not None]):
         return {"status": "Échec: Service non initialisé"}
 
-    # 1. OCR and AI Extraction
+    # 1. OCR
     try:
         response = vision_client.text_detection(image=vision.Image(content=image_content))
-        if not response.text_annotations: raise Exception("No text detected")
+        if not response.text_annotations:
+            return {"status": "Échec OCR", "details": "Aucun texte détecté sur l'image."}
         ocr_text = response.text_annotations[0].description
-        
-        # UPDATED PROMPT to specifically ask for "tarif de référence"
+        print(f"--- OCR Text ---\n{ocr_text}\n-----------------")
+    except Exception as e:
+        print(f"Google Vision API Error: {e}")
+        return {"status": "Échec OCR", "details": str(e)}
+
+    # 2. AI Extraction
+    ai_data = {}
+    try:
         system_prompt = """
         You are an expert at reading French medication labels (vignettes). Your task is to extract information into a valid JSON object.
         The JSON must contain these keys: "nom", "dci", "dosage", "conditionnement", "ppa", and "tarif_ref".
         - "ppa" is the total price.
         - "tarif_ref" is the "Tarif de Référence". Look for labels like "TR", "T.R", "Tarif", "Tarif de Réf.", etc. It is the reimbursement base price.
-        
-        Only return the JSON object, with no additional text or markdown.
+        Only return the JSON object.
         Example: { "nom": "DOLIPRANE", "dci": "PARACETAMOL", "dosage": "1000 MG", "conditionnement": "BTE/8", "ppa": "195.00", "tarif_ref": "150.00" }
         """
         chat_completion = groq_client.chat.completions.create(
@@ -131,15 +126,13 @@ def process_image_data(image_content):
         )
         ai_data = json.loads(chat_completion.choices[0].message.content)
     except Exception as e:
-        return {"status": "Échec de la lecture/analyse", "details": str(e)}
+        print(f"Groq AI extraction failed: {e}. Proceeding with raw text fallback.")
+        # Do not return; allow the code to fall through to the raw text matching
 
-    # 2. Signature Creation and Response Formatting
-    ocr_name_sig = normalize_string(ai_data.get('nom', ''))
-    extracted_ppa = parse_price(ai_data.get('ppa', ''))
-    extracted_tarif = parse_price(ai_data.get('tarif_ref', '')) # NEW
-
+    # 3. Signature Creation and Response Formatting
     def get_verified_response(db_row, score, status="Vérifié"):
-        final_ppa = extracted_ppa or parse_price(db_row.get('PPA')) # PPA is the price from the main file
+        extracted_ppa = parse_price(ai_data.get('ppa', ''))
+        final_ppa = extracted_ppa or parse_price(db_row.get('PPA'))
         return {
             "nom": db_row.get('Nom Commercial'), "dci": db_row.get('DCI'),
             "dosage": db_row.get('Dosage'), "conditionnement": db_row.get('Présentation'),
@@ -148,34 +141,52 @@ def process_image_data(image_content):
             "posologie_frequence": "3", "posologie_periode": "par jour"
         }
 
-    # 3. New Matching Logic: Tarif-First
+    # 4. Matching Logic
+    result = None
+
+    # Attempt 1: Tarif-First (most reliable)
+    extracted_tarif = parse_price(ai_data.get('tarif_ref', ''))
     if extracted_tarif and extracted_tarif in DB_TARIF_MAP:
         tarif_candidates = DB_TARIF_MAP[extracted_tarif]
         if len(tarif_candidates) == 1:
-            return get_verified_response(tarif_candidates[0], 100, "Vérifié (Tarif Unique)")
+            result = get_verified_response(tarif_candidates[0], 100, "Vérifié (Tarif Unique)")
         else:
+            ocr_name_sig = normalize_string(ai_data.get('nom', ''))
             candidate_names = {normalize_string(c.get('Nom Commercial')): c for c in tarif_candidates}
             best_name_match, score = process.extractOne(ocr_name_sig, candidate_names.keys())
             if score > 80:
-                return get_verified_response(candidate_names[best_name_match], score, "Vérifié (Tarif + Nom)")
+                result = get_verified_response(candidate_names[best_name_match], score, "Vérifié (Tarif + Nom)")
+
+    # Attempt 2: Name-first (if AI data exists and Tarif failed)
+    if not result and ai_data:
+        ocr_name_sig = normalize_string(ai_data.get('nom', ''))
+        best_name_match, score_name = process.extractOne(ocr_name_sig, DB_NAMES_MAP.keys(), scorer=fuzz.token_set_ratio)
+        if score_name >= 75:
+            name_candidates = DB_NAMES_MAP[best_name_match]
+            if len(name_candidates) == 1:
+                result = get_verified_response(name_candidates[0], score_name, "Vérifié (Nom unique)")
             else:
-                return {"status": "Échec: Ambiguïté", "details": f"{len(tarif_candidates)} méds trouvés pour TR {extracted_tarif}, nom incertain."}
+                ocr_details_sig = normalize_string(f"{ai_data.get('dci','')} {ai_data.get('dosage','')} {ai_data.get('conditionnement','')}")
+                candidate_details = {normalize_string(build_reference_string(c, include_name=False)): c for c in name_candidates}
+                best_details, score_details = process.extractOne(ocr_details_sig, candidate_details.keys(), scorer=fuzz.WRatio)
+                if score_details >= 65:
+                    final_score = int((score_name * 0.6) + (score_details * 0.4))
+                    result = get_verified_response(candidate_details[best_details], final_score, "Auto-Corrigé (Nom + Détails)")
+    
+    # Attempt 3: Raw Text Fallback (if everything else failed)
+    if not result:
+        print("--- Executing Raw Text Fallback ---")
+        normalized_ocr = normalize_string(ocr_text)
+        best_match, score = process.extractOne(normalized_ocr, DB_ALL_NAMES, scorer=fuzz.token_set_ratio)
+        if score > 70: # Use a reasonable threshold for this less accurate method
+            # Since we only have the name, we take the first candidate. This is why it needs verification.
+            candidate_drug = DB_NAMES_MAP[best_match][0]
+            result = get_verified_response(candidate_drug, score, "Non Vérifié (Scan Brute)")
 
-    # 4. Fallback to name-first matching if Tarif fails
-    best_name_match, score_name = process.extractOne(ocr_name_sig, DB_NAMES_MAP.keys(), scorer=fuzz.token_set_ratio)
-    if score_name >= 75:
-        name_candidates = DB_NAMES_MAP[best_name_match]
-        if len(name_candidates) == 1:
-            return get_verified_response(name_candidates[0], score_name, "Vérifié (Nom unique)")
+    if result:
+        return result
 
-        ocr_details_sig = normalize_string(f"{ai_data.get('dci','')} {ai_data.get('dosage','')} {ai_data.get('conditionnement','')}")
-        candidate_details = {normalize_string(build_reference_string(c, include_name=False)): c for c in name_candidates}
-        best_details, score_details = process.extractOne(ocr_details_sig, candidate_details.keys(), scorer=fuzz.WRatio)
-        if score_details >= 65:
-            final_score = int((score_name * 0.6) + (score_details * 0.4))
-            return get_verified_response(candidate_details[best_details], final_score, "Auto-Corrigé (Nom + Détails)")
-
-    return {"status": "Échec de la reconnaissance", "details": f"Aucun médicament correspondant trouvé. TR: '{extracted_tarif}', Nom: '{ocr_name_sig}'"}
+    return {"status": "Échec de la reconnaissance", "details": f"Aucune correspondance fiable trouvée."}
 
 
 # --- API Routes (unchanged) ---
