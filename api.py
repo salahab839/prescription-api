@@ -46,12 +46,10 @@ def extract_numeric_dosage(dosage_str):
         return float(numbers[0])
     return None
 
-# --- NEW HELPER FUNCTION ---
 def extract_numbers_from_string(s):
     """Extracts all integer numbers from a string and returns them as a list."""
     if not isinstance(s, str): return []
     return [int(num) for num in re.findall(r'\d+', s)]
-# --- END NEW HELPER FUNCTION ---
 
 def build_reference_string(row, include_name=True, include_details=True):
     parts = []
@@ -127,16 +125,29 @@ def process_image_data(image_content):
     except Exception as e:
         return {"status": "Échec de l'analyse IA", "details": str(e)}
 
-    # 3. Response Formatting
+    # --- START: MODIFIED RESPONSE FORMATTING FUNCTION ---
     def get_response(db_row, score, status="Vérifié"):
+        # Prioritize PPA from the vignette (AI) as it's the most current.
+        ppa_value = ai_data.get('ppa')
+
+        # If AI fails to find PPA on the vignette, fall back to the database PPA.
+        # Assuming the column in your Excel/CSV file is named 'PPA'.
+        if not ppa_value:
+            ppa_value = parse_ppa(db_row.get('PPA', ''))
+
+        # If PPA is still missing from both, default to "0.00" to avoid errors.
+        if not ppa_value:
+            ppa_value = "0.00"
+
         return {
             "nom": db_row.get('Nom Commercial'), "dci": db_row.get('DCI'),
             "dosage": db_row.get('Dosage'), "conditionnement": db_row.get('Présentation'),
-            "ppa": ai_data.get('ppa'), 
+            "ppa": ppa_value, # This value is now guaranteed to be non-empty
             "match_score": score, "status": status,
             "posologie_qte_prise": "1", "posologie_unite": db_row.get('Forme', ''),
             "posologie_frequence": "3", "posologie_periode": "par jour"
         }
+    # --- END: MODIFIED RESPONSE FORMATTING FUNCTION ---
 
     # 4. Matching Logic
     ocr_name_sig = normalize_string(ai_data.get('nom',''))
@@ -158,7 +169,6 @@ def process_image_data(image_content):
         if len(exact_dosage_matches) == 1:
             return get_response(exact_dosage_matches[0], 100, status="Vérifié (Dosage Exact)")
         
-        # --- START: REVISED LOGIC FOR AMBIGUOUS DOSAGE MATCH ---
         if len(exact_dosage_matches) > 1:
             ocr_presentation_str = ai_data.get('conditionnement', '')
             
@@ -187,7 +197,6 @@ def process_image_data(image_content):
                 )
                 if score >= 85:
                     return get_response(candidate_presentations_map[best_match], score, status="Vérifié (Forme Exacte)")
-        # --- END: REVISED LOGIC ---
 
     # Fallback to original broader details matching if the above logic didn't return a result
     ocr_details_sig = normalize_string(f"{ai_data.get('dosage','')} {ai_data.get('conditionnement','')}")
