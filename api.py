@@ -59,44 +59,18 @@ def build_reference_string(row, include_name=True, include_details=True):
         parts.append(row.get('Présentation', ''))
     return " ".join(filter(None, parts)).strip()
 
-def extract_price(text):
-    """
-    MODIFIED: Extracts a price from a string, handling equations like '1+2=3' or '1+2'.
-    It prioritizes the result after an equals sign.
-    """
-    if not isinstance(text, str): return None
-    
-    # Clean the string, keep essential math characters
-    text = text.replace(',', '.').strip()
-    
-    # Priority 1: Look for an equation with an equals sign (e.g., ...=124.50)
-    match_equals = re.search(r'=(\s*\d+\.?\d*)', text)
-    if match_equals:
-        try:
-            return f"{float(match_equals.group(1)):.2f}"
-        except (ValueError, IndexError):
-            pass # Fallback to other methods
-
-    # Priority 2: Try to evaluate a simple sum (e.g., 120+23+1)
-    if '+' in text:
-        try:
-            # Remove anything that is not a digit, a dot, or a plus sign
-            cleaned_sum_text = re.sub(r'[^0-9.+]', '', text)
-            if cleaned_sum_text.count('+') > 0:
-                result = sum(map(float, cleaned_sum_text.split('+')))
-                return f"{result:.2f}"
-        except (ValueError, IndexError, TypeError):
-            pass # Fallback to simple number extraction
-
-    # Priority 3: Fallback to finding any number
-    match_num = re.search(r'(\d+\.?\d+)', text)
-    if match_num:
-        try:
-            return f"{float(match_num.group(1)):.2f}"
-        except (ValueError, IndexError):
-            pass
-            
-    return "0.00"
+def parse_ppa(text):
+    if not isinstance(text, str): return ""
+    # Find all number sequences in the string.
+    # This will find ['120', '12', '1', '133'] in "120+12+1=133 da".
+    numbers = re.findall(r'(\d[\d,.]*)', text)
+    # If no numbers are found, return an empty string.
+    if not numbers:
+        return ""
+    # The final price is typically the last number in the string.
+    last_number_str = numbers[-1]
+    # Replace comma with a period for standard decimal format and return.
+    return last_number_str.replace(',', '.')
 
 # --- Database Loading ---
 DB_NAMES_MAP = {}
@@ -135,34 +109,31 @@ def process_image_data(image_content):
         system_prompt = """
         You are an expert at reading French medication labels. Your task is to extract information into a valid JSON object.
         The JSON must contain these keys: "nom", "dosage", "conditionnement", "ppa".
-        The "ppa" can be a simple number like "450.00" or an equation like "420.50+30.00=450.50".
         Only return the JSON object.
-        Example: { "nom": "CLAMOXYL", "dosage": "1 G", "conditionnement": "B/14", "ppa": "450.50" }
+        Example: { "nom": "CLAMOXYL", "dosage": "1 G", "conditionnement": "B/14", "ppa": "450.00" }
         """
         chat_completion = groq_client.chat.completions.create(
             messages=[{"role": "system", "content": system_prompt}, {"role": "user", "content": f"Texte à analyser:\n---\n{ocr_text}\n---"}],
             model="llama3-8b-8192", response_format={"type": "json_object"}
         )
         ai_data = json.loads(chat_completion.choices[0].message.content)
-        # MODIFIED: Use the new robust price extraction function
-        ai_data['ppa'] = extract_price(ai_data.get('ppa', ''))
+        ai_data['ppa'] = parse_ppa(ai_data.get('ppa', ''))
         print(f"--- AI Data (with parsed PPA) ---\n{ai_data}\n---------------")
     except Exception as e:
         return {"status": "Échec de l'analyse IA", "details": str(e)}
 
     def get_response(db_row, score, status="Vérifié"):
-        ppa_value = ai_data.get('ppa', "0.00")
-        if ppa_value == "0.00":
-            # MODIFIED: Use the new robust price extraction function for the database value too
-            ppa_value = extract_price(db_row.get('PPA', ''))
-        
+        ppa_value = ai_data.get('ppa')
+        if not ppa_value:
+            ppa_value = parse_ppa(db_row.get('PPA', ''))
+        if not ppa_value:
+            ppa_value = "0.00"
         return {
             "nom": db_row.get('Nom Commercial'), "dci": db_row.get('DCI'),
             "dosage": db_row.get('Dosage'), "conditionnement": db_row.get('Présentation'),
             "ppa": ppa_value,
             "match_score": score, "status": status,
             "posologie_qte_prise": "",
-
             "posologie_unite": db_row.get('Forme', ''),
             "posologie_frequence": "",
             "posologie_periode": ""
@@ -209,31 +180,20 @@ def process_image_data(image_content):
     return {"status": "Échec de la reconnaissance", "details": "Aucune correspondance fiable trouvée."}
 
 # --- API Routes ---
-# MODIFIED: Renamed from /api/create-session to reflect it's for starting the whole app session
-@app.route('/api/start-session', methods=['POST'])
-def start_session():
+@app.route('/api/create-session', methods=['POST'])
+def create_session():
     session_id = str(uuid.uuid4())
-    # A session now represents a persistent link to a desktop app instance
-    SESSIONS[session_id] = {"status": "active", "medications": [], "timestamp": time.time()}
-    print(f"New persistent session created: {session_id}")
-    return jsonify({"session_id": session_id}), 201
+    SESSIONS[session_id] = {"status": "pending", "medications": [], "timestamp": time.time()}
+    return jsonify({"session_id": session_id})
 
-# MODIFIED: Renamed to /scan for clarity
-@app.route('/scan/<session_id>')
+@app.route('/phone-upload/<session_id>')
 def phone_upload_page(session_id):
-    session = SESSIONS.get(session_id)
-    if not session:
-        return "Session invalide ou expirée.", 404
-    # The page can be opened as long as the session is valid
-    return render_template('uploader.html')
+    return render_template('uploader.html') if session_id in SESSIONS else ("Session invalide.", 404)
 
-# MODIFIED: Renamed to /api/upload for clarity
-@app.route('/api/upload/<session_id>', methods=['POST'])
+@app.route('/api/upload-by-session/<session_id>', methods=['POST'])
 def upload_by_session(session_id):
-    session = SESSIONS.get(session_id)
-    if not session:
-        return jsonify({"error": "Session invalide ou expirée"}), 404
-    # We no longer check for 'pending' status, an 'active' session can always receive uploads
+    if session_id not in SESSIONS or SESSIONS[session_id]['status'] != 'pending':
+        return jsonify({"error": "Session invalide ou terminée"}), 404
     if 'file' not in request.files:
         return jsonify({"error": "Aucun fichier"}), 400
     try:
@@ -241,9 +201,7 @@ def upload_by_session(session_id):
         processed_data = process_image_data(image_content)
         if "Échec" not in processed_data.get("status", ""):
             image_base64 = base64.b64encode(image_content).decode('utf-8')
-            # Add medication to the persistent session
             SESSIONS[session_id]['medications'].append({"data": processed_data, "image_base64": image_base64})
-            SESSIONS[session_id]['timestamp'] = time.time() # Update timestamp on activity
             return jsonify({"status": "success", "message": "Médicament ajouté."})
         else:
             return jsonify({"status": "failure", "message": processed_data.get("details", "Vignette illisible")})
@@ -251,35 +209,24 @@ def upload_by_session(session_id):
         traceback.print_exc()
         return jsonify({"error": f"Erreur de traitement: {e}"}), 500
 
-# MODIFIED: This now only gets called by the phone when the page is closed
 @app.route('/api/finish-session/<session_id>', methods=['POST'])
 def finish_session(session_id):
-    # This marks the session for deletion, it doesn't affect the desktop app's state directly
     if session_id in SESSIONS:
         SESSIONS[session_id]['status'] = 'finished'
-        print(f"Phone disconnected from session: {session_id}")
         return jsonify({"status": "success"})
     return jsonify({"error": "Session invalide"}), 404
 
-# MODIFIED: check-session logic adjusted for persistent sessions
 @app.route('/api/check-session/<session_id>')
 def check_session(session_id):
-    # Clean up old, finished sessions first
-    for s_id, s_info in list(SESSIONS.items()):
-        # Expire sessions finished for > 2 mins or active for > 1 hour
-        is_finished = s_info.get("status") == 'finished' and (time.time() - s_info.get("timestamp", 0) > 120)
-        is_stale = s_info.get("status") != 'finished' and (time.time() - s_info.get("timestamp", 0) > 3600)
-        if is_finished or is_stale:
-            del SESSIONS[s_id]
-            print(f"Expired session cleaned up: {s_id}")
-
     if session_id not in SESSIONS:
-        return jsonify({"status": "expired"}), 410 # Use 410 Gone for expired sessions
-    
+        return jsonify({"status": "invalid"}), 404
     session_info = SESSIONS[session_id]
+    if time.time() - session_info.get("timestamp", 0) > 600:
+        if session_id in SESSIONS:
+            del SESSIONS[session_id]
+        return jsonify({"status": "expired"}), 410
     return jsonify({"status": session_info['status'], "medications": session_info['medications']})
 
-# This endpoint remains for local file processing
 @app.route('/process_vignette', methods=['POST'])
 def process_vignette_endpoint():
     if 'file' not in request.files:
